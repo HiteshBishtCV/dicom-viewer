@@ -1,6 +1,8 @@
 from fastapi import FastAPI, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydicom.dataset import FileMetaDataset
+from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 import pydicom
 import os
 
@@ -20,6 +22,31 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/files", StaticFiles(directory="."), name="files")
 
 
+def fix_dicom_header(path):
+    """
+    If a DICOM file is missing the File Meta Information header (preamble + DICM prefix),
+    rewrite it with a proper header so browser-side dicom-parser can read it.
+    """
+    try:
+        pydicom.dcmread(path, stop_before_pixels=True)
+        return  # already valid
+    except Exception:
+        pass
+
+    ds = pydicom.dcmread(path, force=True)
+
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID = getattr(ds, "SOPClassUID", "1.2.840.10008.5.1.4.1.1.2")
+    meta.MediaStorageSOPInstanceUID = getattr(ds, "SOPInstanceUID", generate_uid())
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+    ds.file_meta = meta
+    ds.is_implicit_VR = False
+    ds.is_little_endian = True
+
+    ds.save_as(path, write_like_original=False)
+
+
 @app.post("/upload/")
 async def upload(files: list[UploadFile]):
     series_dict = {}
@@ -32,8 +59,10 @@ async def upload(files: list[UploadFile]):
             f.write(await file.read())
 
         try:
-            # force=True handles files missing the DICOM preamble/meta header
-            ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+            # Ensure file has a valid DICOM meta header for browser parsing
+            fix_dicom_header(path)
+
+            ds = pydicom.dcmread(path, stop_before_pixels=True)
             modality = getattr(ds, "Modality", "unknown")
             series_uid = str(getattr(ds, "SeriesInstanceUID", filename))
 
@@ -79,18 +108,8 @@ async def upload(files: list[UploadFile]):
                 }
 
             elif modality == "RTDOSE":
-                n_frames = int(getattr(ds, "NumberOfFrames", 1))
-                dose_type = getattr(ds, "DoseType", "PHYSICAL")
-                dose_units = getattr(ds, "DoseUnits", "GY")
-                series_dict[series_uid] = {
-                    "modality": "RTDOSE",
-                    "description": f"Dose — {dose_type} ({dose_units})",
-                    "type": "multiframe",
-                    "instances": [
-                        {"path": path, "instance": i, "frame": i}
-                        for i in range(n_frames)
-                    ],
-                }
+                # Skip RT Dose visualization for now
+                continue
 
             elif modality == "REG":
                 regs = getattr(ds, "RegistrationSequence", [])
