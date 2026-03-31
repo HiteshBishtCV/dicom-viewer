@@ -31,6 +31,7 @@ let currentImageIds  = [];
 let currentIndex     = 0;
 let currentViewport  = null;   // preserved across slices, reset on series change
 let activeBtn        = null;
+let wheelMode        = 'scroll'; // 'scroll' | 'zoom' — toggled by middle mouse press
 
 // ── TASK 2: Viewport init ─────────────────────────────────────────────────────
 // displayImage() uses getDefaultViewportForImage only on the FIRST slice of a
@@ -110,19 +111,54 @@ window.addEventListener('mousemove', function(e) {
 window.addEventListener('mouseup',    () => { isDragging = false; });
 window.addEventListener('mouseleave', () => { isDragging = false; });
 
-// ── Mouse wheel scroll ────────────────────────────────────────────────────────
+// ── Middle mouse button: toggle scroll / zoom mode ───────────────────────────
+
+element.addEventListener('mousedown', function(e) {
+  if (e.button === 1) {           // wheel press
+    e.preventDefault();
+    wheelMode = wheelMode === 'scroll' ? 'zoom' : 'scroll';
+    updateModeIndicator();
+  }
+});
+
+// Prevent default middle-click auto-scroll behaviour in browsers
+element.addEventListener('auxclick', function(e) {
+  if (e.button === 1) e.preventDefault();
+});
+
+function updateModeIndicator() {
+  const el = document.getElementById('modeIndicator');
+  if (!el) return;
+  if (wheelMode === 'zoom') {
+    el.textContent = '🔍 Zoom mode  (middle-click to switch)';
+    el.style.color = '#ffd54f';
+  } else {
+    el.textContent = '↕ Scroll mode  (middle-click to switch)';
+    el.style.color = '#aaa';
+  }
+}
+
+// ── Mouse wheel: scroll slices or zoom ───────────────────────────────────────
 
 element.addEventListener('wheel', function(e) {
   e.preventDefault();
   if (!currentImageIds.length) return;
 
-  const delta = e.deltaY > 0 ? 1 : -1;
-  const next  = Math.max(0, Math.min(currentImageIds.length - 1, currentIndex + delta));
-  if (next === currentIndex) return;
-
-  currentIndex  = next;
-  slider.value  = next;
-  displayImage(next);
+  if (wheelMode === 'zoom') {
+    const vp = cornerstone.getViewport(element);
+    if (!vp) return;
+    const factor = e.deltaY > 0 ? 0.9 : 1.1;          // down = zoom out, up = zoom in
+    vp.scale = Math.max(0.1, Math.min(10, vp.scale * factor));
+    cornerstone.setViewport(element, vp);
+    currentViewport = vp;
+  } else {
+    const delta = e.deltaY > 0 ? 1 : -1;
+    const next  = Math.max(0, Math.min(currentImageIds.length - 1, currentIndex + delta));
+    if (next === currentIndex) return;
+    currentIndex  = next;
+    slider.value  = next;
+    displayImage(next);
+  }
 }, { passive: false });
 
 // ── Upload ───────────────────────────────────────────────────────────────────
