@@ -62,9 +62,9 @@ async function showMPRView(series, imageIds) {
   initSlider('sagittalSlider', mprVolume.cols   - 1, xIndex, v => { xIndex = v; updateAllViews(); });
 
   // Wire up mouse-wheel on each canvas
-  attachWheelScroll('axialCanvas',    () => { zIndex += arguments[0]; updateAllViews(); });
-  attachWheelScroll('coronalCanvas',  () => { yIndex += arguments[0]; updateAllViews(); });
-  attachWheelScroll('sagittalCanvas', () => { xIndex += arguments[0]; updateAllViews(); });
+  attachWheelScroll('axialCanvas',    (d) => { zIndex += d; updateAllViews(); });
+  attachWheelScroll('coronalCanvas',  (d) => { yIndex += d; updateAllViews(); });
+  attachWheelScroll('sagittalCanvas', (d) => { xIndex += d; updateAllViews(); });
 
   updateAllViews();
 }
