@@ -25,17 +25,27 @@ cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
 cornerstoneTools.external.Hammer = Hammer;
 cornerstoneTools.init();
 
-cornerstoneTools.addTool(cornerstoneTools.StackScrollMouseWheelTool);
-cornerstoneTools.setToolActive('StackScrollMouseWheel', {});
-
-// Add stack state manager once only
-cornerstoneTools.addStackStateManager(element, ['stack']);
-
 // ── State ────────────────────────────────────────────────────────────────────
 
-let currentStack = null;
-let newImageListener = null;
+let currentImageIds = [];
+let currentIndex = 0;
 let activeBtn = null;
+
+// ── Mouse wheel scroll (direct, bypasses cornerstone-tools) ──────────────────
+
+element.addEventListener('wheel', function(e) {
+  e.preventDefault();
+  if (!currentImageIds.length) return;
+
+  const delta = e.deltaY > 0 ? 1 : -1;
+  const next = Math.max(0, Math.min(currentImageIds.length - 1, currentIndex + delta));
+  if (next === currentIndex) return;
+
+  currentIndex = next;
+  slider.value = next;
+  updateSliceLabel(next, currentImageIds.length);
+  displayImage(next);
+}, { passive: false });
 
 // ── Upload ───────────────────────────────────────────────────────────────────
 
@@ -140,56 +150,34 @@ function loadSeries(series) {
   metaPanel.style.display = "block";
   infoPanel.style.display = "none";
 
-  const imageIds = series.instances.map(item => {
+  currentImageIds = series.instances.map(item => {
     const base = `wadouri:http://127.0.0.1:8000/files/${item.path}`;
     return series.type === "multiframe" ? `${base}?frame=${item.frame}` : base;
   });
+  currentIndex = 0;
 
-  const total = imageIds.length;
+  const total = currentImageIds.length;
   slider.max = total - 1;
   slider.value = 0;
 
-  // Replace stack state cleanly so the wheel tool picks up the new series
-  cornerstoneTools.clearToolState(element, 'stack');
-  const stack = { currentImageIdIndex: 0, imageIds };
-  cornerstoneTools.addToolState(element, 'stack', stack);
-  currentStack = stack;
-
-  // Populate metadata sidebar
   renderMetaPanel(series, total);
-
-  loadImage(0);
+  displayImage(0);
 
   slider.oninput = function() {
-    const index = parseInt(this.value);
-    currentStack.currentImageIdIndex = index;
-    updateSliceLabel(index, total);
-    loadImage(index);
+    currentIndex = parseInt(this.value);
+    updateSliceLabel(currentIndex, total);
+    displayImage(currentIndex);
   };
+}
 
-  // Sync slider when wheel scroll changes slice
-  if (newImageListener) {
-    element.removeEventListener('cornerstonenewimage', newImageListener);
-  }
-  newImageListener = function(e) {
-    const index = imageIds.indexOf(e.detail.image.imageId);
-    if (index !== -1) {
-      slider.value = index;
-      currentStack.currentImageIdIndex = index;
-      updateSliceLabel(index, total);
-    }
-  };
-  element.addEventListener('cornerstonenewimage', newImageListener);
-
-  function loadImage(index) {
-    cornerstone.loadImage(imageIds[index]).then(function(image) {
-      const viewport = cornerstone.getDefaultViewportForImage(element, image);
-      cornerstone.displayImage(element, image, viewport);
-      updateSliceLabel(index, total);
-    }).catch(function(err) {
-      console.error("Failed to load image:", err);
-    });
-  }
+function displayImage(index) {
+  cornerstone.loadImage(currentImageIds[index]).then(function(image) {
+    const viewport = cornerstone.getDefaultViewportForImage(element, image);
+    cornerstone.displayImage(element, image, viewport);
+    updateSliceLabel(index, currentImageIds.length);
+  }).catch(function(err) {
+    console.error("Failed to load image:", err);
+  });
 }
 
 function updateSliceLabel(index, total) {
