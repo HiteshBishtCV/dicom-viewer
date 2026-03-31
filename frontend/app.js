@@ -1,11 +1,14 @@
 const element = document.getElementById('dicomImage');
 const slider = document.getElementById('sliceSlider');
+const sliceLabel = document.getElementById('sliceLabel');
+const metaPanel = document.getElementById('metaPanel');
+const metaContent = document.getElementById('metaContent');
 const infoPanel = document.getElementById('infoPanel');
 
-// Setup loader
+// ── Cornerstone setup ────────────────────────────────────────────────────────
+
 cornerstoneWADOImageLoader.external.cornerstone = cornerstone;
 cornerstoneWADOImageLoader.external.dicomParser = dicomParser;
-
 cornerstoneWADOImageLoader.webWorkerManager.initialize({
   webWorkerPath: 'https://unpkg.com/cornerstone-wado-image-loader/dist/cornerstoneWADOImageLoaderWebWorker.js',
   taskConfiguration: {
@@ -25,14 +28,20 @@ cornerstoneTools.init();
 cornerstoneTools.addTool(cornerstoneTools.StackScrollMouseWheelTool);
 cornerstoneTools.setToolActive('StackScrollMouseWheel', {});
 
+// Add stack state manager once only
+cornerstoneTools.addStackStateManager(element, ['stack']);
+
+// ── State ────────────────────────────────────────────────────────────────────
+
 let currentStack = null;
 let newImageListener = null;
+let activeBtn = null;
+
+// ── Upload ───────────────────────────────────────────────────────────────────
 
 document.getElementById('fileInput').addEventListener('change', async function(e) {
   const formData = new FormData();
-  for (let file of e.target.files) {
-    formData.append("files", file);
-  }
+  for (let file of e.target.files) formData.append("files", file);
 
   const response = await fetch("http://127.0.0.1:8000/upload/", {
     method: "POST",
@@ -44,11 +53,12 @@ document.getElementById('fileInput').addEventListener('change', async function(e
   showSeries(data);
 });
 
+// ── Series list ──────────────────────────────────────────────────────────────
+
 function showSeries(seriesData) {
   const container = document.getElementById("seriesList");
   container.innerHTML = "";
 
-  // Sort: image/multiframe first, then metadata-only
   const order = { image: 0, multiframe: 1, plan: 2, struct: 3, reg: 4 };
   const sorted = Object.values(seriesData).sort(
     (a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9)
@@ -59,71 +69,75 @@ function showSeries(seriesData) {
     let label;
     switch (series.type) {
       case "image":
-      case "multiframe":
-        label = `${series.instances.length} slices`;
-        break;
-      case "plan":    label = `${series.metadata.beam_count} beams`; break;
-      case "struct":  label = `${series.metadata.roi_count} ROIs`;   break;
-      default:        label = series.type;
+      case "multiframe": label = `${series.instances.length} slices`; break;
+      case "plan":       label = `${series.metadata.beam_count} beams`; break;
+      case "struct":     label = `${series.metadata.roi_count} ROIs`; break;
+      default:           label = series.type;
     }
     btn.innerText = `[${series.modality}] ${series.description} (${label})`;
-    btn.style.display = "block";
-    btn.style.margin = "3px 0";
 
     if (series.type === "image" || series.type === "multiframe") {
-      btn.onclick = () => loadSeries(series);
+      btn.onclick = () => { setActiveBtn(btn); loadSeries(series); };
     } else {
-      btn.onclick = () => showMetadata(series);
+      btn.onclick = () => { setActiveBtn(btn); showMetadata(series); };
     }
 
     container.appendChild(btn);
   });
 }
 
+function setActiveBtn(btn) {
+  if (activeBtn) activeBtn.classList.remove('active');
+  activeBtn = btn;
+  btn.classList.add('active');
+}
+
+// ── Metadata-only display (RTPLAN, RTSTRUCT, REG) ────────────────────────────
+
 function showMetadata(series) {
   element.style.display = "none";
   slider.style.display = "none";
+  sliceLabel.style.display = "none";
+  metaPanel.style.display = "none";
   infoPanel.style.display = "block";
 
-  let html = `<h3>[${series.modality}] ${series.description}</h3>`;
+  let html = `<h3 style="margin-bottom:10px">[${series.modality}] ${series.description}</h3>`;
 
   if (series.type === "plan") {
     const m = series.metadata;
     const rows = m.beams.map(b =>
       `<tr><td>${b.name}</td><td>${b.type}</td><td>${b.energy} MV</td></tr>`
     ).join("");
-    html += `
-      <p>Beams: <b>${m.beam_count}</b></p>
-      <table border="1" cellpadding="4" cellspacing="0">
+    html += `<p style="margin-bottom:8px">Beams: <b>${m.beam_count}</b></p>
+      <table>
         <thead><tr><th>Name</th><th>Type</th><th>Energy</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
-  }
-
-  else if (series.type === "struct") {
+  } else if (series.type === "struct") {
     const m = series.metadata;
     const rows = m.rois.map(r =>
       `<tr><td>${r.number}</td><td>${r.name}</td></tr>`
     ).join("");
-    html += `
-      <p>ROIs: <b>${m.roi_count}</b></p>
-      <table border="1" cellpadding="4" cellspacing="0">
+    html += `<p style="margin-bottom:8px">ROIs: <b>${m.roi_count}</b></p>
+      <table>
         <thead><tr><th>#</th><th>Name</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
-  }
-
-  else if (series.type === "reg") {
+  } else if (series.type === "reg") {
     html += `<p>${series.metadata.description}</p>
-             <p>Registration entries: <b>${series.metadata.entry_count}</b></p>`;
+             <p>Entries: <b>${series.metadata.entry_count}</b></p>`;
   }
 
   infoPanel.innerHTML = html;
 }
 
+// ── Image series viewer ──────────────────────────────────────────────────────
+
 function loadSeries(series) {
   element.style.display = "block";
   slider.style.display = "block";
+  sliceLabel.style.display = "block";
+  metaPanel.style.display = "block";
   infoPanel.style.display = "none";
 
   const imageIds = series.instances.map(item => {
@@ -131,22 +145,29 @@ function loadSeries(series) {
     return series.type === "multiframe" ? `${base}?frame=${item.frame}` : base;
   });
 
-  slider.max = imageIds.length - 1;
+  const total = imageIds.length;
+  slider.max = total - 1;
   slider.value = 0;
 
+  // Replace stack state cleanly so the wheel tool picks up the new series
+  cornerstoneTools.clearToolState(element, 'stack');
   const stack = { currentImageIdIndex: 0, imageIds };
-  cornerstoneTools.addStackStateManager(element, ['stack']);
   cornerstoneTools.addToolState(element, 'stack', stack);
   currentStack = stack;
+
+  // Populate metadata sidebar
+  renderMetaPanel(series, total);
 
   loadImage(0);
 
   slider.oninput = function() {
     const index = parseInt(this.value);
     currentStack.currentImageIdIndex = index;
+    updateSliceLabel(index, total);
     loadImage(index);
   };
 
+  // Sync slider when wheel scroll changes slice
   if (newImageListener) {
     element.removeEventListener('cornerstonenewimage', newImageListener);
   }
@@ -155,6 +176,7 @@ function loadSeries(series) {
     if (index !== -1) {
       slider.value = index;
       currentStack.currentImageIdIndex = index;
+      updateSliceLabel(index, total);
     }
   };
   element.addEventListener('cornerstonenewimage', newImageListener);
@@ -163,8 +185,43 @@ function loadSeries(series) {
     cornerstone.loadImage(imageIds[index]).then(function(image) {
       const viewport = cornerstone.getDefaultViewportForImage(element, image);
       cornerstone.displayImage(element, image, viewport);
+      updateSliceLabel(index, total);
     }).catch(function(err) {
       console.error("Failed to load image:", err);
     });
   }
+}
+
+function updateSliceLabel(index, total) {
+  sliceLabel.textContent = `Slice ${index + 1} / ${total}`;
+}
+
+function renderMetaPanel(series, total) {
+  const m = series.series_metadata || {};
+
+  const ps = m.pixel_spacing
+    ? `${m.pixel_spacing[0]} × ${m.pixel_spacing[1]} mm`
+    : '—';
+  const st = m.slice_thickness ? `${m.slice_thickness} mm` : '—';
+  const dims = (m.rows && m.cols) ? `${m.rows} × ${m.cols} px` : '—';
+  const wc = m.window_center ? m.window_center : '—';
+  const ww = m.window_width ? m.window_width : '—';
+
+  const rows = [
+    ['Modality',        series.modality],
+    ['Series',          series.description],
+    ['Slices',          total],
+    ['Dimensions',      dims],
+    ['Pixel Spacing',   ps],
+    ['Slice Thickness', st],
+    ['Window Center',   wc],
+    ['Window Width',    ww],
+  ];
+
+  metaContent.innerHTML = rows.map(([label, value]) => `
+    <div class="row">
+      <span class="label">${label}</span>
+      <span class="value">${value}</span>
+    </div>
+  `).join('');
 }

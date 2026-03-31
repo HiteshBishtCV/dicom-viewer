@@ -140,10 +140,20 @@ async def upload(files: list[UploadFile]):
                 )
 
                 if series_uid not in series_dict:
+                    # Capture key metadata from the first slice of the series
+                    ps = getattr(ds, "PixelSpacing", None)
                     series_dict[series_uid] = {
                         "modality": modality,
                         "description": description,
                         "type": "image",
+                        "series_metadata": {
+                            "rows": int(getattr(ds, "Rows", 0)),
+                            "cols": int(getattr(ds, "Columns", 0)),
+                            "slice_thickness": float(getattr(ds, "SliceThickness", 0) or 0),
+                            "pixel_spacing": [round(float(ps[0]), 3), round(float(ps[1]), 3)] if ps else None,
+                            "window_center": float(getattr(ds, "WindowCenter", 0) or 0),
+                            "window_width": float(getattr(ds, "WindowWidth", 0) or 0),
+                        },
                         "instances": [],
                     }
 
