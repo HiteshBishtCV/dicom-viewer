@@ -109,7 +109,7 @@ function renderCoronal(y) {
   const data = new Float32Array(v.slices * v.cols);
   for (let s = 0; s < v.slices; s++) {
     const srcRow = s * v.rows * v.cols + y * v.cols;
-    const dstRow = (v.slices - 1 - s) * v.cols;        // flip z → superior up
+    const dstRow = s * v.cols;                          // ascending → slice 0 at top (superior)
     for (let c = 0; c < v.cols; c++) {
       data[dstRow + (v.cols - 1 - c)] = v.buffer[srcRow + c];  // flip horizontal
     }
@@ -124,7 +124,7 @@ function renderSagittal(x) {
   const v    = mprVolume;
   const data = new Float32Array(v.slices * v.rows);
   for (let s = 0; s < v.slices; s++) {
-    const dstRow = (v.slices - 1 - s) * v.rows;        // flip z → superior up
+    const dstRow = s * v.rows;                          // ascending → slice 0 at top (superior)
     for (let r = 0; r < v.rows; r++) {
       data[dstRow + (v.rows - 1 - r)] = v.buffer[s * v.rows * v.cols + r * v.cols + x]; // flip horizontal
     }
