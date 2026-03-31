@@ -15,28 +15,39 @@
     body { font-family: sans-serif; background: #1a1a1a; color: #e0e0e0; padding: 16px; }
     h2 { margin-bottom: 12px; }
 
+    /* ── Series buttons ── */
     #seriesList { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
     #seriesList button {
       background: #2a2a2a; color: #ccc; border: 1px solid #444;
       padding: 5px 10px; cursor: pointer; border-radius: 4px; font-size: 13px;
     }
-    #seriesList button:hover { background: #3a3a3a; color: #fff; }
+    #seriesList button:hover  { background: #3a3a3a; color: #fff; }
     #seriesList button.active { background: #005a9e; color: #fff; border-color: #0078d4; }
 
     hr { border-color: #333; margin: 12px 0; }
 
-    #viewerRow { display: flex; gap: 16px; align-items: flex-start; }
-
-    #viewerCol { display: flex; flex-direction: column; gap: 6px; }
-
-    #dicomImage {
-      width: 512px; height: 512px;
-      border: 1px solid #444; background: #000;
-    }
-
+    /* ── 2D viewer ── */
+    #viewerRow  { display: flex; gap: 16px; align-items: flex-start; }
+    #viewerCol  { display: flex; flex-direction: column; gap: 6px; }
+    #dicomImage { width: 512px; height: 512px; border: 1px solid #444; background: #000; }
     #sliceSlider { width: 512px; }
-    #sliceLabel { font-size: 13px; color: #aaa; text-align: center; width: 512px; }
+    #sliceLabel  { font-size: 13px; color: #aaa; text-align: center; width: 512px; }
 
+    #presets { display: flex; gap: 6px; width: 512px; }
+    #presets button {
+      flex: 1; background: #2a2a2a; color: #ccc; border: 1px solid #444;
+      padding: 5px 0; cursor: pointer; border-radius: 4px; font-size: 12px;
+    }
+    #presets button:hover { background: #3a3a3a; color: #fff; }
+
+    #mprBtn {
+      width: 512px; padding: 7px 0; background: #1a3a5a; color: #4fc3f7;
+      border: 1px solid #0078d4; border-radius: 4px; cursor: pointer;
+      font-size: 13px; font-weight: 600; display: none;
+    }
+    #mprBtn:hover { background: #1e4a72; }
+
+    /* ── Metadata panel ── */
     #metaPanel {
       background: #222; border: 1px solid #444; border-radius: 6px;
       padding: 14px; min-width: 220px; font-size: 13px; line-height: 1.8;
@@ -49,48 +60,86 @@
     #metaPanel .wl-display {
       margin-top: 10px; padding: 8px 10px; background: #111;
       border-radius: 4px; border: 1px solid #333; font-size: 14px;
-      letter-spacing: 0.5px;
     }
     #metaPanel .wl-display span { color: #4fc3f7; font-weight: 700; }
 
-    #presets { display: flex; gap: 6px; width: 512px; }
-    #presets button {
-      flex: 1; background: #2a2a2a; color: #ccc; border: 1px solid #444;
-      padding: 5px 0; cursor: pointer; border-radius: 4px; font-size: 12px;
-    }
-    #presets button:hover { background: #3a3a3a; color: #fff; }
-
+    /* ── Info panel (RTPLAN, RTSTRUCT etc.) ── */
     #infoPanel { font-family: sans-serif; max-width: 700px; margin-top: 12px; }
     #infoPanel table { border-collapse: collapse; width: 100%; }
     #infoPanel th, #infoPanel td { border: 1px solid #444; padding: 6px 10px; }
     #infoPanel th { background: #2a2a2a; }
+
+    /* ── MPR section ── */
+    #mprSection { display: none; }
+
+    #mprTopBar {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 10px; flex-wrap: wrap; gap: 8px;
+    }
+    #mprTopBar button {
+      background: #2a2a2a; color: #ccc; border: 1px solid #444;
+      padding: 5px 12px; cursor: pointer; border-radius: 4px; font-size: 13px;
+    }
+    #mprTopBar button:hover { background: #3a3a3a; color: #fff; }
+    #mprTopBar .back { color: #4fc3f7; border-color: #0078d4; }
+
+    #mprProgressWrap {
+      background: #333; border-radius: 4px; height: 4px; margin-bottom: 12px;
+    }
+    #mprProgressBar {
+      height: 100%; width: 0%; background: #4fc3f7;
+      border-radius: 4px; transition: width 0.15s;
+    }
+
+    #mprGrid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .mprPane {
+      background: #111; border: 1px solid #444;
+      border-radius: 6px; padding: 8px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .mprPane .mprLabel {
+      font-size: 11px; font-weight: 700; color: #4fc3f7;
+      letter-spacing: 1px;
+    }
+    .mprPane canvas {
+      width: 100%; aspect-ratio: 1 / 1;
+      background: #000; display: block;
+    }
+    .mprPane input[type=range] { width: 100%; }
   </style>
 </head>
 
 <body>
 
   <h2>DICOM Viewer</h2>
-
   <input type="file" id="fileInput" webkitdirectory multiple />
-
   <hr>
   <div id="seriesList"></div>
   <hr>
 
+  <!-- ── 2D viewer ──────────────────────────────────────────────── -->
   <div id="viewerRow">
     <div id="viewerCol">
       <div id="dicomImage"></div>
       <input type="range" id="sliceSlider" min="0" max="0" value="0">
       <div id="sliceLabel">—</div>
       <div id="presets" style="display:none;">
-        <button onclick="applyPreset(-600, 1600)">Lung</button>
-        <button onclick="applyPreset(400, 1800)">Bone</button>
-        <button onclick="applyPreset(40, 400)">Soft Tissue</button>
-        <button onclick="applyPreset(600, 2800)">Brain</button>
+        <button onclick="applyPreset(-600,1600)">Lung</button>
+        <button onclick="applyPreset(400,1800)">Bone</button>
+        <button onclick="applyPreset(40,400)">Soft Tissue</button>
+        <button onclick="applyPreset(600,2800)">Brain</button>
       </div>
-      <div id="modeIndicator" style="font-size:12px;color:#aaa;margin-top:4px;">
+      <div id="modeIndicator" style="font-size:12px;color:#aaa;margin-top:2px;">
         ↕ Scroll mode &nbsp;(middle-click to switch)
       </div>
+      <button id="mprBtn" onclick="showMPRView(window._activeSeries, window._activeImageIds)">
+        ⊞ MPR View (Axial · Coronal · Sagittal)
+      </button>
     </div>
 
     <div id="metaPanel" style="display:none;">
@@ -104,6 +153,42 @@
 
   <div id="infoPanel" style="display:none;"></div>
 
+  <!-- ── MPR section ───────────────────────────────────────────── -->
+  <div id="mprSection">
+    <div id="mprTopBar">
+      <button class="back" onclick="exitMPR()">← Back to 2D</button>
+      <div style="display:flex;gap:6px;">
+        <button onclick="applyMPRPreset(-600,1600)">Lung</button>
+        <button onclick="applyMPRPreset(400,1800)">Bone</button>
+        <button onclick="applyMPRPreset(40,400)">Soft Tissue</button>
+        <button onclick="applyMPRPreset(600,2800)">Brain</button>
+      </div>
+    </div>
+
+    <div id="mprProgressWrap">
+      <div id="mprProgressBar"></div>
+    </div>
+
+    <div id="mprGrid">
+      <div class="mprPane">
+        <div class="mprLabel" id="axialLabel">AXIAL</div>
+        <canvas id="axialCanvas"></canvas>
+        <input type="range" id="axialSlider" min="0" max="0" value="0">
+      </div>
+      <div class="mprPane">
+        <div class="mprLabel" id="coronalLabel">CORONAL</div>
+        <canvas id="coronalCanvas"></canvas>
+        <input type="range" id="coronalSlider" min="0" max="0" value="0">
+      </div>
+      <div class="mprPane">
+        <div class="mprLabel" id="sagittalLabel">SAGITTAL</div>
+        <canvas id="sagittalCanvas"></canvas>
+        <input type="range" id="sagittalSlider" min="0" max="0" value="0">
+      </div>
+    </div>
+  </div>
+
+  <script src="mpr.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

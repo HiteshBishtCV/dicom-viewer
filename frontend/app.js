@@ -236,6 +236,18 @@ function loadSeries(series) {
   slider.max      = total - 1;
   slider.value    = 0;
 
+  // Expose for MPR button (defined in HTML onclick)
+  window._activeSeries   = series;
+  window._activeImageIds = currentImageIds;
+
+  // Show MPR button only for volumetric image series (CT/MR with multiple slices)
+  const mprBtn = document.getElementById('mprBtn');
+  if ((series.modality === 'CT' || series.modality === 'MR') && total > 1) {
+    mprBtn.style.display = 'block';
+  } else {
+    mprBtn.style.display = 'none';
+  }
+
   renderMetaPanel(series, total);
   displayImage(0);
 
