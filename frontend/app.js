@@ -1,11 +1,11 @@
 const element = document.getElementById('dicomImage');
 const slider = document.getElementById('sliceSlider');
+const planInfo = document.getElementById('planInfo');
 
 // Setup loader
 cornerstoneWADOImageLoader.external.cornerstone = cornerstone;
 cornerstoneWADOImageLoader.external.dicomParser = dicomParser;
 
-// Web worker
 cornerstoneWADOImageLoader.webWorkerManager.initialize({
   webWorkerPath: 'https://unpkg.com/cornerstone-wado-image-loader/dist/cornerstoneWADOImageLoaderWebWorker.js',
   taskConfiguration: {
@@ -24,17 +24,14 @@ cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
 cornerstoneTools.external.Hammer = Hammer;
 cornerstoneTools.init();
 
-// Add and activate mouse wheel scroll tool
 cornerstoneTools.addTool(cornerstoneTools.StackScrollMouseWheelTool);
 cornerstoneTools.setToolActive('StackScrollMouseWheel', {});
 
-// Track current image stack for wheel scrolling
 let currentStack = null;
 let newImageListener = null;
 
 document.getElementById('fileInput').addEventListener('change', async function(e) {
   const files = e.target.files;
-
   const formData = new FormData();
 
   for (let file of files) {
@@ -47,9 +44,7 @@ document.getElementById('fileInput').addEventListener('change', async function(e
   });
 
   const data = await response.json();
-
   console.log("Series received:", data);
-
   showSeries(data);
 });
 
@@ -61,25 +56,57 @@ function showSeries(seriesData) {
     const series = seriesData[uid];
 
     const btn = document.createElement("button");
-    btn.innerText = `${series.modality} - ${series.description} (${series.instances.length})`;
+    const count = series.type === "plan"
+      ? "metadata"
+      : `${series.instances.length} slices`;
+    btn.innerText = `${series.modality} — ${series.description} (${count})`;
 
-    btn.onclick = () => loadSeries(series.instances);
+    if (series.type === "plan") {
+      btn.onclick = () => showPlanMetadata(series);
+    } else {
+      btn.onclick = () => loadSeries(series);
+    }
 
     container.appendChild(btn);
     container.appendChild(document.createElement("br"));
   });
 }
 
-function loadSeries(instances) {
+function showPlanMetadata(series) {
+  // Hide viewer, show plan info
+  element.style.display = "none";
+  slider.style.display = "none";
+  planInfo.style.display = "block";
 
-  const imageIds = instances.map(item =>
-    "wadouri:http://127.0.0.1:8000/files/" + item.path
-  );
+  const m = series.metadata;
+  const beamRows = m.beams
+    .map(b => `<tr><td>${b.name}</td><td>${b.type}</td><td>${b.energy} MV</td></tr>`)
+    .join("");
+
+  planInfo.innerHTML = `
+    <h3>RT Plan: ${m.label}</h3>
+    <p>Total beams: <b>${m.beam_count}</b></p>
+    <table border="1" cellpadding="4" cellspacing="0">
+      <thead><tr><th>Beam Name</th><th>Type</th><th>Energy</th></tr></thead>
+      <tbody>${beamRows}</tbody>
+    </table>
+  `;
+}
+
+function loadSeries(series) {
+  // Show viewer, hide plan info
+  element.style.display = "block";
+  slider.style.display = "block";
+  planInfo.style.display = "none";
+
+  const imageIds = series.instances.map(item => {
+    const base = `wadouri:http://127.0.0.1:8000/files/${item.path}`;
+    return series.type === "multiframe" ? `${base}?frame=${item.frame}` : base;
+  });
 
   slider.max = imageIds.length - 1;
   slider.value = 0;
 
-  // Tell the stack scroll tool about this image stack
   const stack = { currentImageIdIndex: 0, imageIds };
   cornerstoneTools.addStackStateManager(element, ['stack']);
   cornerstoneTools.addToolState(element, 'stack', stack);
@@ -93,7 +120,6 @@ function loadSeries(instances) {
     loadImage(index);
   };
 
-  // Keep slider in sync when wheel scroll changes slice
   if (newImageListener) {
     element.removeEventListener('cornerstonenewimage', newImageListener);
   }
@@ -109,8 +135,8 @@ function loadSeries(instances) {
   function loadImage(index) {
     cornerstone.loadImage(imageIds[index]).then(function(image) {
       cornerstone.displayImage(element, image);
-    }).catch(function(err){
-      console.error(err);
+    }).catch(function(err) {
+      console.error("Failed to load image:", err);
     });
   }
 }

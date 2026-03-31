@@ -6,7 +6,6 @@ import os
 
 app = FastAPI()
 
-# Allow frontend to talk to backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,43 +28,82 @@ async def upload(files: list[UploadFile]):
         filename = os.path.basename(file.filename)
         path = os.path.join(UPLOAD_DIR, filename)
 
-        # Save file
         with open(path, "wb") as f:
             f.write(await file.read())
 
         try:
             ds = pydicom.dcmread(path, stop_before_pixels=True)
-
-            series_uid = getattr(ds, "SeriesInstanceUID", "unknown")
             modality = getattr(ds, "Modality", "unknown")
-            description = getattr(ds, "SeriesDescription", "NA")
-            instance = getattr(ds, "InstanceNumber", 0)
+            series_uid = getattr(ds, "SeriesInstanceUID", "unknown")
 
-            # Filter scouts/localizers
-            image_type = getattr(ds, "ImageType", [])
-            if "LOCALIZER" in image_type or "SCOUT" in image_type:
-                continue
-
-            if series_uid not in series_dict:
+            if modality == "RTPLAN":
+                beams = getattr(ds, "BeamSequence", [])
                 series_dict[series_uid] = {
-                    "modality": modality,
-                    "description": description,
-                    "instances": []
+                    "modality": "RTPLAN",
+                    "description": getattr(ds, "RTPlanLabel", "RT Plan"),
+                    "type": "plan",
+                    "metadata": {
+                        "label": getattr(ds, "RTPlanLabel", ""),
+                        "beam_count": len(beams),
+                        "beams": [
+                            {
+                                "name": getattr(b, "BeamName", "?"),
+                                "type": getattr(b, "BeamType", "?"),
+                                "energy": str(getattr(b, "NominalBeamEnergy", "?")),
+                            }
+                            for b in beams
+                        ],
+                    },
+                    "instances": [],
                 }
 
-            series_dict[series_uid]["instances"].append({
-                "path": path,
-                "instance": instance
-            })
+            elif modality == "RTDOSE":
+                n_frames = int(getattr(ds, "NumberOfFrames", 1))
+                dose_type = getattr(ds, "DoseType", "PHYSICAL")
+                dose_units = getattr(ds, "DoseUnits", "GY")
+                series_dict[series_uid] = {
+                    "modality": "RTDOSE",
+                    "description": f"Dose — {dose_type} ({dose_units})",
+                    "type": "multiframe",
+                    "instances": [
+                        {"path": path, "instance": i, "frame": i}
+                        for i in range(n_frames)
+                    ],
+                }
+
+            else:
+                # CT, MR, RTIMAGE and others
+                image_type = getattr(ds, "ImageType", [])
+                if "LOCALIZER" in image_type or "SCOUT" in image_type:
+                    continue
+
+                description = getattr(
+                    ds,
+                    "SeriesDescription",
+                    getattr(ds, "RTImageLabel", "NA"),
+                )
+                instance = int(getattr(ds, "InstanceNumber", getattr(ds, "AcquisitionNumber", 0)))
+
+                if series_uid not in series_dict:
+                    series_dict[series_uid] = {
+                        "modality": modality,
+                        "description": description,
+                        "type": "image",
+                        "instances": [],
+                    }
+
+                series_dict[series_uid]["instances"].append(
+                    {"path": path, "instance": instance, "frame": 0}
+                )
 
         except Exception as e:
-            print(f"Skipping file {file.filename}: {e}")
+            print(f"Skipping {filename}: {e}")
 
-    # Sort slices in each series
     for uid in series_dict:
         series_dict[uid]["instances"].sort(key=lambda x: x["instance"])
 
     return series_dict
+
 
 @app.get("/")
 def root():
