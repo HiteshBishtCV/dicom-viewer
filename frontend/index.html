@@ -46,6 +46,19 @@
     #metaPanel .row { display: flex; justify-content: space-between; gap: 12px; }
     #metaPanel .label { color: #888; }
     #metaPanel .value { color: #fff; font-weight: 500; }
+    #metaPanel .wl-display {
+      margin-top: 10px; padding: 8px 10px; background: #111;
+      border-radius: 4px; border: 1px solid #333; font-size: 14px;
+      letter-spacing: 0.5px;
+    }
+    #metaPanel .wl-display span { color: #4fc3f7; font-weight: 700; }
+
+    #presets { display: flex; gap: 6px; width: 512px; }
+    #presets button {
+      flex: 1; background: #2a2a2a; color: #ccc; border: 1px solid #444;
+      padding: 5px 0; cursor: pointer; border-radius: 4px; font-size: 12px;
+    }
+    #presets button:hover { background: #3a3a3a; color: #fff; }
 
     #infoPanel { font-family: sans-serif; max-width: 700px; margin-top: 12px; }
     #infoPanel table { border-collapse: collapse; width: 100%; }
@@ -69,11 +82,20 @@
       <div id="dicomImage"></div>
       <input type="range" id="sliceSlider" min="0" max="0" value="0">
       <div id="sliceLabel">—</div>
+      <div id="presets" style="display:none;">
+        <button onclick="applyPreset(-600, 1600)">Lung</button>
+        <button onclick="applyPreset(400, 1800)">Bone</button>
+        <button onclick="applyPreset(40, 400)">Soft Tissue</button>
+        <button onclick="applyPreset(600, 2800)">Brain</button>
+      </div>
     </div>
 
     <div id="metaPanel" style="display:none;">
       <h4>Series Info</h4>
       <div id="metaContent"></div>
+      <div class="wl-display">
+        WL: <span id="meta-wc">—</span> &nbsp;|&nbsp; WW: <span id="meta-ww">—</span>
+      </div>
     </div>
   </div>
 

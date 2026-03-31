@@ -91,19 +91,20 @@ window.addEventListener('mousemove', function(e) {
   const dx =  (e.clientX - dragStartX);   // right = wider  = more contrast
   const dy = -(e.clientY - dragStartY);   // up    = higher = brighter
 
-  const sensitivity = 3;
-  const newWW = Math.max(1, dragStartWW + dx * sensitivity);
-  const newWC = dragStartWC + dy * sensitivity;
+  // Task 7: sensitivity=2 for smooth interaction
+  const newWW = dragStartWW + dx * 2;
+  const newWC = dragStartWC + dy * 2;
 
   const vp = cornerstone.getViewport(element);
   if (!vp) return;
 
-  vp.voi.windowWidth  = newWW;
-  vp.voi.windowCenter = newWC;
+  // Task 6: clamp to prevent instability
+  vp.voi.windowWidth  = Math.max(1, Math.min(10000, newWW));
+  vp.voi.windowCenter = Math.max(-2000, Math.min(5000, newWC));
   cornerstone.setViewport(element, vp);
   currentViewport = vp;
 
-  updateWLDisplay(Math.round(newWC), Math.round(newWW));
+  updateWLDisplay(Math.round(vp.voi.windowCenter), Math.round(vp.voi.windowWidth));
 });
 
 window.addEventListener('mouseup',    () => { isDragging = false; });
@@ -181,11 +182,12 @@ function setActiveBtn(btn) {
 // ── Image series loader ───────────────────────────────────────────────────────
 
 function loadSeries(series) {
-  element.style.display  = 'block';
-  slider.style.display   = 'block';
+  element.style.display   = 'block';
+  slider.style.display    = 'block';
   sliceLabel.style.display = 'block';
   metaPanel.style.display  = 'block';
   infoPanel.style.display  = 'none';
+  document.getElementById('presets').style.display = 'flex';
 
   currentImageIds = series.instances.map(item => {
     const base = `wadouri:http://127.0.0.1:8000/files/${item.path}`;
@@ -260,8 +262,6 @@ function renderMetaPanel(series, total) {
     ['Dimensions',      dims],
     ['Pixel Spacing',   ps],
     ['Slice Thickness', st],
-    ['W/C',             `<span id="meta-wc">—</span>`],
-    ['W/W',             `<span id="meta-ww">—</span>`],
   ];
 
   metaContent.innerHTML = rows.map(([label, value]) => `
@@ -277,6 +277,18 @@ function updateWLDisplay(wc, ww) {
   const wwEl = document.getElementById('meta-ww');
   if (wcEl) wcEl.textContent = wc;
   if (wwEl) wwEl.textContent = ww;
+}
+
+// Task 4: window/level presets
+function applyPreset(wc, ww) {
+  if (!currentImageIds.length) return;
+  const vp = cornerstone.getViewport(element);
+  if (!vp) return;
+  vp.voi.windowCenter = wc;
+  vp.voi.windowWidth  = ww;
+  cornerstone.setViewport(element, vp);
+  currentViewport = vp;
+  updateWLDisplay(wc, ww);
 }
 
 function updateSliceLabel(index, total) {
