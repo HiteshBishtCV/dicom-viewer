@@ -161,7 +161,8 @@ function loadSeries(series) {
 
   function loadImage(index) {
     cornerstone.loadImage(imageIds[index]).then(function(image) {
-      cornerstone.displayImage(element, image);
+      const viewport = cornerstone.getDefaultViewportForImage(element, image);
+      cornerstone.displayImage(element, image, viewport);
     }).catch(function(err) {
       console.error("Failed to load image:", err);
     });
