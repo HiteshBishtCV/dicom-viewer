@@ -98,7 +98,8 @@ function renderAxial(z) {
   const v    = mprVolume;
   const size = v.rows * v.cols;
   const slice = v.buffer.subarray(z * size, (z + 1) * size);
-  renderToCanvas(slice, v.cols, v.rows, 'axialCanvas');
+  renderToCanvas(slice, v.cols, v.rows, 'axialCanvas',
+    { left: 'R', right: 'L' });
   document.getElementById('axialLabel').textContent = `AXIAL  —  z ${z + 1} / ${v.slices}`;
 }
 
@@ -108,12 +109,13 @@ function renderCoronal(y) {
   const data = new Float32Array(v.slices * v.cols);
   for (let s = 0; s < v.slices; s++) {
     const srcRow = s * v.rows * v.cols + y * v.cols;
-    const dstRow = (v.slices - 1 - s) * v.cols;   // flip z → superior up
+    const dstRow = (v.slices - 1 - s) * v.cols;        // flip z → superior up
     for (let c = 0; c < v.cols; c++) {
-      data[dstRow + c] = v.buffer[srcRow + c];
+      data[dstRow + (v.cols - 1 - c)] = v.buffer[srcRow + c];  // flip horizontal
     }
   }
-  renderToCanvas(data, v.cols, v.slices, 'coronalCanvas');
+  renderToCanvas(data, v.cols, v.slices, 'coronalCanvas',
+    { left: 'L', right: 'R', top: 'S', bottom: 'I' });
   document.getElementById('coronalLabel').textContent = `CORONAL  —  y ${y + 1} / ${v.rows}`;
 }
 
@@ -122,18 +124,19 @@ function renderSagittal(x) {
   const v    = mprVolume;
   const data = new Float32Array(v.slices * v.rows);
   for (let s = 0; s < v.slices; s++) {
-    const dstRow = (v.slices - 1 - s) * v.rows;   // flip z → superior up
+    const dstRow = (v.slices - 1 - s) * v.rows;        // flip z → superior up
     for (let r = 0; r < v.rows; r++) {
-      data[dstRow + r] = v.buffer[s * v.rows * v.cols + r * v.cols + x];
+      data[dstRow + (v.rows - 1 - r)] = v.buffer[s * v.rows * v.cols + r * v.cols + x]; // flip horizontal
     }
   }
-  renderToCanvas(data, v.rows, v.slices, 'sagittalCanvas');
+  renderToCanvas(data, v.rows, v.slices, 'sagittalCanvas',
+    { left: 'P', right: 'A', top: 'S', bottom: 'I' });
   document.getElementById('sagittalLabel').textContent = `SAGITTAL  —  x ${x + 1} / ${v.cols}`;
 }
 
 // ── Canvas renderer ───────────────────────────────────────────────────────────
 
-function renderToCanvas(pixelData, srcW, srcH, canvasId) {
+function renderToCanvas(pixelData, srcW, srcH, canvasId, labels) {
   const canvas = document.getElementById(canvasId);
   const low    = mprWC - mprWW / 2;
   const range  = mprWW;
@@ -153,24 +156,53 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId) {
   octx.putImageData(imgData, 0, 0);
 
   // Scale-to-fit into display canvas, preserving aspect ratio
-  const ctx    = canvas.getContext('2d');
-  const dw     = canvas.clientWidth  || canvas.width;
-  const dh     = canvas.clientHeight || canvas.height;
+  const ctx = canvas.getContext('2d');
+  const dw  = canvas.clientWidth  || canvas.width;
+  const dh  = canvas.clientHeight || canvas.height;
   canvas.width  = dw;
   canvas.height = dh;
 
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, dw, dh);
 
-  const scale  = Math.min(dw / srcW, dh / srcH);
-  const drawW  = srcW * scale;
-  const drawH  = srcH * scale;
-  const offX   = (dw - drawW) / 2;
-  const offY   = (dh - drawH) / 2;
+  const scale = Math.min(dw / srcW, dh / srcH);
+  const drawW = srcW * scale;
+  const drawH = srcH * scale;
+  const offX  = (dw - drawW) / 2;
+  const offY  = (dh - drawH) / 2;
 
-  ctx.imageSmoothingEnabled  = true;
-  ctx.imageSmoothingQuality  = 'high';
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(offscreen, offX, offY, drawW, drawH);
+
+  // Orientation labels
+  if (labels) {
+    const fs = Math.max(13, Math.floor(dw / 22));
+    ctx.font         = `bold ${fs}px sans-serif`;
+    ctx.fillStyle    = '#ffff00';
+    ctx.shadowColor  = '#000';
+    ctx.shadowBlur   = 4;
+    ctx.textBaseline = 'middle';
+
+    if (labels.left) {
+      ctx.textAlign = 'left';
+      ctx.fillText(labels.left, offX + 6, offY + drawH / 2);
+    }
+    if (labels.right) {
+      ctx.textAlign = 'right';
+      ctx.fillText(labels.right, offX + drawW - 6, offY + drawH / 2);
+    }
+    if (labels.top) {
+      ctx.textAlign = 'center';
+      ctx.fillText(labels.top, offX + drawW / 2, offY + fs);
+    }
+    if (labels.bottom) {
+      ctx.textAlign = 'center';
+      ctx.fillText(labels.bottom, offX + drawW / 2, offY + drawH - fs / 2);
+    }
+
+    ctx.shadowBlur = 0;
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

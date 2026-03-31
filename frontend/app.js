@@ -25,6 +25,24 @@ cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
 cornerstoneTools.external.Hammer = Hammer;
 cornerstoneTools.init();
 
+// Draw R / L labels after every Cornerstone render (survives W/L drag redraws)
+element.addEventListener('cornerstoneimagerendered', function() {
+  const canvas = element.querySelector('canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.font         = 'bold 18px sans-serif';
+  ctx.fillStyle    = '#ffff00';
+  ctx.shadowColor  = '#000';
+  ctx.shadowBlur   = 4;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign    = 'left';
+  ctx.fillText('R', 8, h / 2);
+  ctx.textAlign    = 'right';
+  ctx.fillText('L', w - 8, h / 2);
+  ctx.shadowBlur   = 0;
+});
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 let currentImageIds  = [];
