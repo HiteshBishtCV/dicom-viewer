@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>DICOM Viewer</title>
+
+  <!-- Core -->
+  <script src="https://unpkg.com/cornerstone-core/dist/cornerstone.js"></script>
+  <script src="https://unpkg.com/dicom-parser/dist/dicomParser.js"></script>
+
+  <!-- Loader -->
+  <script src="https://unpkg.com/cornerstone-wado-image-loader/dist/cornerstoneWADOImageLoader.bundle.min.js"></script>
+
+  <!-- Tools -->
+  <script src="https://unpkg.com/hammerjs/hammer.min.js"></script>
+  <script src="https://unpkg.com/cornerstone-math/dist/cornerstoneMath.js"></script>
+  <script src="https://unpkg.com/cornerstone-tools/dist/cornerstoneTools.js"></script>
+</head>
+
+<body>
+
+  <h2>DICOM Viewer (Phase 1)</h2>
+
+  <input type="file" id="fileInput" webkitdirectory multiple />
+
+  <hr>
+
+  <div id="seriesList"></div>
+
+  <hr>
+
+  <div id="dicomImage" style="width:512px;height:512px;border:1px solid black;"></div>
+
+  <br>
+
+  <input type="range" id="sliceSlider" min="0" max="0" value="0" style="width:512px;">
+
+  <!-- JS file -->
+  <script src="app.js"></script>
+
+</body>
+</html>
