@@ -32,9 +32,10 @@ async def upload(files: list[UploadFile]):
             f.write(await file.read())
 
         try:
-            ds = pydicom.dcmread(path, stop_before_pixels=True)
+            # force=True handles files missing the DICOM preamble/meta header
+            ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
             modality = getattr(ds, "Modality", "unknown")
-            series_uid = getattr(ds, "SeriesInstanceUID", "unknown")
+            series_uid = str(getattr(ds, "SeriesInstanceUID", filename))
 
             if modality == "RTPLAN":
                 beams = getattr(ds, "BeamSequence", [])
@@ -57,6 +58,26 @@ async def upload(files: list[UploadFile]):
                     "instances": [],
                 }
 
+            elif modality == "RTSTRUCT":
+                rois = getattr(ds, "StructureSetROISequence", [])
+                series_dict[series_uid] = {
+                    "modality": "RTSTRUCT",
+                    "description": getattr(ds, "StructureSetLabel", "Structure Set"),
+                    "type": "struct",
+                    "metadata": {
+                        "label": getattr(ds, "StructureSetLabel", ""),
+                        "roi_count": len(rois),
+                        "rois": [
+                            {
+                                "name": getattr(r, "ROIName", "?"),
+                                "number": int(getattr(r, "ROINumber", 0)),
+                            }
+                            for r in rois
+                        ],
+                    },
+                    "instances": [],
+                }
+
             elif modality == "RTDOSE":
                 n_frames = int(getattr(ds, "NumberOfFrames", 1))
                 dose_type = getattr(ds, "DoseType", "PHYSICAL")
@@ -71,8 +92,21 @@ async def upload(files: list[UploadFile]):
                     ],
                 }
 
+            elif modality == "REG":
+                regs = getattr(ds, "RegistrationSequence", [])
+                series_dict[series_uid] = {
+                    "modality": "REG",
+                    "description": getattr(ds, "SeriesDescription", "Image Registration"),
+                    "type": "reg",
+                    "metadata": {
+                        "description": getattr(ds, "SeriesDescription", "Image Registration"),
+                        "entry_count": len(regs),
+                    },
+                    "instances": [],
+                }
+
             else:
-                # CT, MR, RTIMAGE and others
+                # CT, MR, RTIMAGE and other image modalities
                 image_type = getattr(ds, "ImageType", [])
                 if "LOCALIZER" in image_type or "SCOUT" in image_type:
                     continue
@@ -82,7 +116,9 @@ async def upload(files: list[UploadFile]):
                     "SeriesDescription",
                     getattr(ds, "RTImageLabel", "NA"),
                 )
-                instance = int(getattr(ds, "InstanceNumber", getattr(ds, "AcquisitionNumber", 0)))
+                instance = int(
+                    getattr(ds, "InstanceNumber", getattr(ds, "AcquisitionNumber", 0))
+                )
 
                 if series_uid not in series_dict:
                     series_dict[series_uid] = {

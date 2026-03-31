@@ -3,17 +3,20 @@
 <head>
   <title>DICOM Viewer</title>
 
-  <!-- Core -->
   <script src="https://unpkg.com/cornerstone-core/dist/cornerstone.js"></script>
   <script src="https://unpkg.com/dicom-parser/dist/dicomParser.js"></script>
-
-  <!-- Loader -->
   <script src="https://unpkg.com/cornerstone-wado-image-loader/dist/cornerstoneWADOImageLoader.bundle.min.js"></script>
-
-  <!-- Tools -->
   <script src="https://unpkg.com/hammerjs/hammer.min.js"></script>
   <script src="https://unpkg.com/cornerstone-math/dist/cornerstoneMath.js"></script>
   <script src="https://unpkg.com/cornerstone-tools/dist/cornerstoneTools.js"></script>
+
+  <style>
+    body { font-family: sans-serif; padding: 16px; }
+    #seriesList { margin-bottom: 12px; }
+    #seriesList button { cursor: pointer; }
+    #infoPanel { font-family: sans-serif; max-width: 600px; }
+    #infoPanel table { border-collapse: collapse; }
+  </style>
 </head>
 
 <body>
@@ -28,13 +31,11 @@
 
   <hr>
 
-  <div id="dicomImage" style="width:512px;height:512px;border:1px solid black;background:#000;"></div>
-
+  <div id="dicomImage" style="width:512px;height:512px;border:1px solid #333;background:#000;"></div>
   <br>
-
   <input type="range" id="sliceSlider" min="0" max="0" value="0" style="width:512px;">
 
-  <div id="planInfo" style="display:none; font-family:sans-serif;"></div>
+  <div id="infoPanel" style="display:none;"></div>
 
   <script src="app.js"></script>
 

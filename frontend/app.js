@@ -1,6 +1,6 @@
 const element = document.getElementById('dicomImage');
 const slider = document.getElementById('sliceSlider');
-const planInfo = document.getElementById('planInfo');
+const infoPanel = document.getElementById('infoPanel');
 
 // Setup loader
 cornerstoneWADOImageLoader.external.cornerstone = cornerstone;
@@ -15,10 +15,8 @@ cornerstoneWADOImageLoader.webWorkerManager.initialize({
   }
 });
 
-// Enable cornerstone on the element
 cornerstone.enable(element);
 
-// Init cornerstone tools
 cornerstoneTools.external.cornerstone = cornerstone;
 cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
 cornerstoneTools.external.Hammer = Hammer;
@@ -31,10 +29,8 @@ let currentStack = null;
 let newImageListener = null;
 
 document.getElementById('fileInput').addEventListener('change', async function(e) {
-  const files = e.target.files;
   const formData = new FormData();
-
-  for (let file of files) {
+  for (let file of e.target.files) {
     formData.append("files", file);
   }
 
@@ -52,52 +48,83 @@ function showSeries(seriesData) {
   const container = document.getElementById("seriesList");
   container.innerHTML = "";
 
-  Object.keys(seriesData).forEach(uid => {
-    const series = seriesData[uid];
+  // Sort: image/multiframe first, then metadata-only
+  const order = { image: 0, multiframe: 1, plan: 2, struct: 3, reg: 4 };
+  const sorted = Object.values(seriesData).sort(
+    (a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9)
+  );
 
+  sorted.forEach(series => {
     const btn = document.createElement("button");
-    const count = series.type === "plan"
-      ? "metadata"
-      : `${series.instances.length} slices`;
-    btn.innerText = `${series.modality} — ${series.description} (${count})`;
+    let label;
+    switch (series.type) {
+      case "image":
+      case "multiframe":
+        label = `${series.instances.length} slices`;
+        break;
+      case "plan":    label = `${series.metadata.beam_count} beams`; break;
+      case "struct":  label = `${series.metadata.roi_count} ROIs`;   break;
+      default:        label = series.type;
+    }
+    btn.innerText = `[${series.modality}] ${series.description} (${label})`;
+    btn.style.display = "block";
+    btn.style.margin = "3px 0";
 
-    if (series.type === "plan") {
-      btn.onclick = () => showPlanMetadata(series);
-    } else {
+    if (series.type === "image" || series.type === "multiframe") {
       btn.onclick = () => loadSeries(series);
+    } else {
+      btn.onclick = () => showMetadata(series);
     }
 
     container.appendChild(btn);
-    container.appendChild(document.createElement("br"));
   });
 }
 
-function showPlanMetadata(series) {
-  // Hide viewer, show plan info
+function showMetadata(series) {
   element.style.display = "none";
   slider.style.display = "none";
-  planInfo.style.display = "block";
+  infoPanel.style.display = "block";
 
-  const m = series.metadata;
-  const beamRows = m.beams
-    .map(b => `<tr><td>${b.name}</td><td>${b.type}</td><td>${b.energy} MV</td></tr>`)
-    .join("");
+  let html = `<h3>[${series.modality}] ${series.description}</h3>`;
 
-  planInfo.innerHTML = `
-    <h3>RT Plan: ${m.label}</h3>
-    <p>Total beams: <b>${m.beam_count}</b></p>
-    <table border="1" cellpadding="4" cellspacing="0">
-      <thead><tr><th>Beam Name</th><th>Type</th><th>Energy</th></tr></thead>
-      <tbody>${beamRows}</tbody>
-    </table>
-  `;
+  if (series.type === "plan") {
+    const m = series.metadata;
+    const rows = m.beams.map(b =>
+      `<tr><td>${b.name}</td><td>${b.type}</td><td>${b.energy} MV</td></tr>`
+    ).join("");
+    html += `
+      <p>Beams: <b>${m.beam_count}</b></p>
+      <table border="1" cellpadding="4" cellspacing="0">
+        <thead><tr><th>Name</th><th>Type</th><th>Energy</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  else if (series.type === "struct") {
+    const m = series.metadata;
+    const rows = m.rois.map(r =>
+      `<tr><td>${r.number}</td><td>${r.name}</td></tr>`
+    ).join("");
+    html += `
+      <p>ROIs: <b>${m.roi_count}</b></p>
+      <table border="1" cellpadding="4" cellspacing="0">
+        <thead><tr><th>#</th><th>Name</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  else if (series.type === "reg") {
+    html += `<p>${series.metadata.description}</p>
+             <p>Registration entries: <b>${series.metadata.entry_count}</b></p>`;
+  }
+
+  infoPanel.innerHTML = html;
 }
 
 function loadSeries(series) {
-  // Show viewer, hide plan info
   element.style.display = "block";
   slider.style.display = "block";
-  planInfo.style.display = "none";
+  infoPanel.style.display = "none";
 
   const imageIds = series.instances.map(item => {
     const base = `wadouri:http://127.0.0.1:8000/files/${item.path}`;
