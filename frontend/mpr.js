@@ -1,18 +1,47 @@
 // ── MPR (Multi-Planar Reconstruction) ────────────────────────────────────────
-// Builds a 3D Float32Array volume from loaded DICOM slices, then reslices
-// on demand into axial, coronal and sagittal planes rendered on <canvas>.
 
-let mprVolume   = null;   // volume object (see buildVolume)
-let mprWC       = 40;     // window center for MPR rendering
-let mprWW       = 400;    // window width  for MPR rendering
-let mprSeries   = null;   // series object passed from app.js
+// ── Volume ───────────────────────────────────────────────────────────────────
+let mprVolume = null;
+let mprSeries = null;
+let mprWC     = 40;
+let mprWW     = 400;
+
+// ── Shared indices (core of MPR) ─────────────────────────────────────────────
+// These represent the current intersection point in 3D space.
+// Every input source (slider, wheel, keyboard) writes to these
+// and calls updateAllViews() — nothing renders directly.
+let xIndex = 0;   // sagittal plane position  (0 … cols-1)
+let yIndex = 0;   // coronal  plane position  (0 … rows-1)
+let zIndex = 0;   // axial    slice  position  (0 … slices-1)
+
+// ── Centralized rendering engine ─────────────────────────────────────────────
+function updateAllViews() {
+  if (!mprVolume) return;
+
+  const v = mprVolume;
+
+  // Clamp to valid range
+  xIndex = Math.max(0, Math.min(v.cols   - 1, xIndex));
+  yIndex = Math.max(0, Math.min(v.rows   - 1, yIndex));
+  zIndex = Math.max(0, Math.min(v.slices - 1, zIndex));
+
+  // Sync all sliders
+  document.getElementById('axialSlider').value    = zIndex;
+  document.getElementById('coronalSlider').value  = yIndex;
+  document.getElementById('sagittalSlider').value = xIndex;
+
+  // Re-render all three planes
+  renderAxial(zIndex);
+  renderCoronal(yIndex);
+  renderSagittal(xIndex);
+}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 async function showMPRView(series, imageIds) {
   mprSeries = series;
 
-  // Sync W/L from the main viewer if available
+  // Sync W/L from the 2D viewer
   const vp = cornerstone.getViewport(document.getElementById('dicomImage'));
   if (vp) { mprWC = Math.round(vp.voi.windowCenter); mprWW = Math.round(vp.voi.windowWidth); }
 
@@ -22,22 +51,22 @@ async function showMPRView(series, imageIds) {
 
   mprVolume = await buildVolume(imageIds, setMPRProgress);
 
-  // Initialise sliders at midpoint
-  const midZ = Math.floor(mprVolume.slices / 2);
-  const midY = Math.floor(mprVolume.rows   / 2);
-  const midX = Math.floor(mprVolume.cols   / 2);
+  // Start at midpoint
+  xIndex = Math.floor(mprVolume.cols   / 2);
+  yIndex = Math.floor(mprVolume.rows   / 2);
+  zIndex = Math.floor(mprVolume.slices / 2);
 
-  initSlider('axialSlider',    mprVolume.slices - 1, midZ, v => renderAxial(v));
-  initSlider('coronalSlider',  mprVolume.rows   - 1, midY, v => renderCoronal(v));
-  initSlider('sagittalSlider', mprVolume.cols   - 1, midX, v => renderSagittal(v));
+  // Wire up sliders — each writes its index and calls updateAllViews()
+  initSlider('axialSlider',    mprVolume.slices - 1, zIndex, v => { zIndex = v; updateAllViews(); });
+  initSlider('coronalSlider',  mprVolume.rows   - 1, yIndex, v => { yIndex = v; updateAllViews(); });
+  initSlider('sagittalSlider', mprVolume.cols   - 1, xIndex, v => { xIndex = v; updateAllViews(); });
 
-  attachWheelScroll('axialCanvas',    'axialSlider',    mprVolume.slices - 1, v => renderAxial(v));
-  attachWheelScroll('coronalCanvas',  'coronalSlider',  mprVolume.rows   - 1, v => renderCoronal(v));
-  attachWheelScroll('sagittalCanvas', 'sagittalSlider', mprVolume.cols   - 1, v => renderSagittal(v));
+  // Wire up mouse-wheel on each canvas
+  attachWheelScroll('axialCanvas',    () => { zIndex += arguments[0]; updateAllViews(); });
+  attachWheelScroll('coronalCanvas',  () => { yIndex += arguments[0]; updateAllViews(); });
+  attachWheelScroll('sagittalCanvas', () => { xIndex += arguments[0]; updateAllViews(); });
 
-  renderAxial(midZ);
-  renderCoronal(midY);
-  renderSagittal(midX);
+  updateAllViews();
 }
 
 function exitMPR() {
@@ -47,14 +76,40 @@ function exitMPR() {
 
 function applyMPRPreset(wc, ww) {
   mprWC = wc; mprWW = ww;
-  rerenderAll();
+  updateAllViews();
 }
+
+// ── Keyboard navigation ───────────────────────────────────────────────────────
+// Arrow Up/Down  → axial (z)        move through slices
+// Arrow Left/Right → sagittal (x)   move left/right
+// W / S          → coronal (y)      move anterior/posterior
+document.addEventListener('keydown', function(e) {
+  if (!mprVolume || document.getElementById('mprSection').style.display === 'none') return;
+
+  // Don't hijack input fields
+  if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+
+  let changed = true;
+  switch (e.key) {
+    case 'ArrowUp':    zIndex--;  break;
+    case 'ArrowDown':  zIndex++;  break;
+    case 'ArrowLeft':  xIndex--;  break;
+    case 'ArrowRight': xIndex++;  break;
+    case 'w': case 'W': yIndex--; break;
+    case 's': case 'S': yIndex++; break;
+    default: changed = false;
+  }
+
+  if (changed) {
+    e.preventDefault();
+    updateAllViews();
+  }
+});
 
 // ── Volume builder ────────────────────────────────────────────────────────────
 
 async function buildVolume(imageIds, onProgress) {
   const images = [];
-
   for (let i = 0; i < imageIds.length; i++) {
     const image = await cornerstone.loadImage(imageIds[i]);
     images.push(image);
@@ -64,7 +119,6 @@ async function buildVolume(imageIds, onProgress) {
   const rows   = images[0].rows;
   const cols   = images[0].columns;
   const slices = images.length;
-
   const buffer = new Float32Array(slices * rows * cols);
 
   for (let s = 0; s < slices; s++) {
@@ -73,7 +127,7 @@ async function buildVolume(imageIds, onProgress) {
     const intercept = images[s].intercept ?? 0;
     const offset    = s * rows * cols;
     for (let i = 0; i < pixels.length; i++) {
-      buffer[offset + i] = pixels[i] * slope + intercept;  // → HU values
+      buffer[offset + i] = pixels[i] * slope + intercept;
     }
   }
 
@@ -81,37 +135,31 @@ async function buildVolume(imageIds, onProgress) {
   const ps = sm.pixel_spacing || [1, 1];
 
   return {
-    buffer,
-    rows,
-    cols,
-    slices,
-    rowSpacing:      parseFloat(ps[0])              || 1,
-    colSpacing:      parseFloat(ps[1])              || 1,
-    sliceThickness:  parseFloat(sm.slice_thickness) || 1,
+    buffer, rows, cols, slices,
+    rowSpacing:     parseFloat(ps[0])              || 1,
+    colSpacing:     parseFloat(ps[1])              || 1,
+    sliceThickness: parseFloat(sm.slice_thickness) || 1,
   };
 }
 
 // ── Reslicing ─────────────────────────────────────────────────────────────────
 
 function renderAxial(z) {
-  if (!mprVolume) return;
   const v    = mprVolume;
   const size = v.rows * v.cols;
   const slice = v.buffer.subarray(z * size, (z + 1) * size);
-  renderToCanvas(slice, v.cols, v.rows, 'axialCanvas',
-    { left: 'R', right: 'L' });
+  renderToCanvas(slice, v.cols, v.rows, 'axialCanvas', { left: 'R', right: 'L' });
   document.getElementById('axialLabel').textContent = `AXIAL  —  z ${z + 1} / ${v.slices}`;
 }
 
 function renderCoronal(y) {
-  if (!mprVolume) return;
   const v    = mprVolume;
   const data = new Float32Array(v.slices * v.cols);
   for (let s = 0; s < v.slices; s++) {
     const srcRow = s * v.rows * v.cols + y * v.cols;
-    const dstRow = s * v.cols;                          // ascending → slice 0 at top (superior)
+    const dstRow = s * v.cols;
     for (let c = 0; c < v.cols; c++) {
-      data[dstRow + (v.cols - 1 - c)] = v.buffer[srcRow + c];  // flip horizontal
+      data[dstRow + (v.cols - 1 - c)] = v.buffer[srcRow + c];  // horizontal flip
     }
   }
   renderToCanvas(data, v.cols, v.slices, 'coronalCanvas',
@@ -120,13 +168,12 @@ function renderCoronal(y) {
 }
 
 function renderSagittal(x) {
-  if (!mprVolume) return;
   const v    = mprVolume;
   const data = new Float32Array(v.slices * v.rows);
   for (let s = 0; s < v.slices; s++) {
-    const dstRow = s * v.rows;                          // ascending → slice 0 at top (superior)
+    const dstRow = s * v.rows;
     for (let r = 0; r < v.rows; r++) {
-      data[dstRow + (v.rows - 1 - r)] = v.buffer[s * v.rows * v.cols + r * v.cols + x]; // flip horizontal
+      data[dstRow + (v.rows - 1 - r)] = v.buffer[s * v.rows * v.cols + r * v.cols + x]; // horizontal flip
     }
   }
   renderToCanvas(data, v.rows, v.slices, 'sagittalCanvas',
@@ -141,7 +188,6 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels) {
   const low    = mprWC - mprWW / 2;
   const range  = mprWW;
 
-  // Build ImageData at native resolution
   const offscreen = new OffscreenCanvas(srcW, srcH);
   const octx      = offscreen.getContext('2d');
   const imgData   = octx.createImageData(srcW, srcH);
@@ -155,7 +201,6 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels) {
   }
   octx.putImageData(imgData, 0, 0);
 
-  // Scale-to-fit into display canvas, preserving aspect ratio
   const ctx = canvas.getContext('2d');
   const dw  = canvas.clientWidth  || canvas.width;
   const dh  = canvas.clientHeight || canvas.height;
@@ -175,7 +220,6 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels) {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(offscreen, offX, offY, drawW, drawH);
 
-  // Orientation labels
   if (labels) {
     const fs = Math.max(13, Math.floor(dw / 22));
     ctx.font         = `bold ${fs}px sans-serif`;
@@ -183,24 +227,10 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels) {
     ctx.shadowColor  = '#000';
     ctx.shadowBlur   = 4;
     ctx.textBaseline = 'middle';
-
-    if (labels.left) {
-      ctx.textAlign = 'left';
-      ctx.fillText(labels.left, offX + 6, offY + drawH / 2);
-    }
-    if (labels.right) {
-      ctx.textAlign = 'right';
-      ctx.fillText(labels.right, offX + drawW - 6, offY + drawH / 2);
-    }
-    if (labels.top) {
-      ctx.textAlign = 'center';
-      ctx.fillText(labels.top, offX + drawW / 2, offY + fs);
-    }
-    if (labels.bottom) {
-      ctx.textAlign = 'center';
-      ctx.fillText(labels.bottom, offX + drawW / 2, offY + drawH - fs / 2);
-    }
-
+    if (labels.left)   { ctx.textAlign = 'left';   ctx.fillText(labels.left,   offX + 6,          offY + drawH / 2); }
+    if (labels.right)  { ctx.textAlign = 'right';  ctx.fillText(labels.right,  offX + drawW - 6,  offY + drawH / 2); }
+    if (labels.top)    { ctx.textAlign = 'center'; ctx.fillText(labels.top,    offX + drawW / 2,  offY + fs); }
+    if (labels.bottom) { ctx.textAlign = 'center'; ctx.fillText(labels.bottom, offX + drawW / 2,  offY + drawH - fs / 2); }
     ctx.shadowBlur = 0;
   }
 }
@@ -208,27 +238,18 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function initSlider(sliderId, max, initial, onChange) {
-  const s  = document.getElementById(sliderId);
-  s.min    = 0;
-  s.max    = max;
-  s.value  = initial;
+  const s   = document.getElementById(sliderId);
+  s.min     = 0;
+  s.max     = max;
+  s.value   = initial;
   s.oninput = () => onChange(parseInt(s.value));
 }
 
-function attachWheelScroll(canvasId, sliderId, max, onChange) {
+function attachWheelScroll(canvasId, onDelta) {
   document.getElementById(canvasId).addEventListener('wheel', function(e) {
     e.preventDefault();
-    const s   = document.getElementById(sliderId);
-    const val = Math.max(0, Math.min(max, parseInt(s.value) + (e.deltaY > 0 ? 1 : -1)));
-    s.value   = val;
-    onChange(val);
+    onDelta(e.deltaY > 0 ? 1 : -1);
   }, { passive: false });
-}
-
-function rerenderAll() {
-  renderAxial(parseInt(document.getElementById('axialSlider').value));
-  renderCoronal(parseInt(document.getElementById('coronalSlider').value));
-  renderSagittal(parseInt(document.getElementById('sagittalSlider').value));
 }
 
 function setMPRProgress(pct) {
