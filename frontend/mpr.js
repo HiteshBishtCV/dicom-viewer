@@ -204,6 +204,10 @@ async function buildVolume(imageIds, onProgress) {
     rowSpacing:     parseFloat(ps[0])              || 1,
     colSpacing:     parseFloat(ps[1])              || 1,
     sliceThickness: parseFloat(sm.slice_thickness) || 1,
+    // Action 4 — pre-allocated reslice buffers; reused every render frame
+    // instead of allocating new Float32Arrays that trigger GC.
+    _coronalBuf:  new Float32Array(slices * cols),
+    _sagittalBuf: new Float32Array(slices * rows),
   };
 
   _volumeCache    = volume;
@@ -230,7 +234,7 @@ function renderAxial(z) {
 
 function renderCoronal(y) {
   const v    = mprVolume;
-  const data = new Float32Array(v.slices * v.cols);
+  const data = v._coronalBuf;   // reuse pre-allocated buffer — no GC pressure
   for (let s = 0; s < v.slices; s++) {
     const srcRow = s * v.rows * v.cols + y * v.cols;
     const dstRow = s * v.cols;
@@ -252,7 +256,7 @@ function renderCoronal(y) {
 
 function renderSagittal(x) {
   const v    = mprVolume;
-  const data = new Float32Array(v.slices * v.rows);
+  const data = v._sagittalBuf;  // reuse pre-allocated buffer — no GC pressure
   for (let s = 0; s < v.slices; s++) {
     const dstRow = s * v.rows;
     for (let r = 0; r < v.rows; r++) {
