@@ -15,16 +15,48 @@ let zIndex = 0;   // axial    slice  position  (0 … slices-1)
 const mprViewState = {};
 
 // ── Zoom state ────────────────────────────────────────────────────────────────
-// Each canvas keeps its own zoom level; mode is shared (one toggle affects all).
 let mprWheelMode = 'scroll';   // 'scroll' | 'zoom'
 const mprCanvasZoom = { axialCanvas: 1, coronalCanvas: 1, sagittalCanvas: 1 };
 
+// ── Performance: image cache ─────────────────────────────────────────────────
+// Keeps decoded Cornerstone image objects alive between MPR sessions so
+// re-entering MPR never re-fetches or re-decodes slices.
+const _imageCache = new Map();   // imageId → cornerstone image
+
+async function _loadImage(imageId) {
+  if (_imageCache.has(imageId)) return _imageCache.get(imageId);
+  const img = await cornerstone.loadImage(imageId);
+  _imageCache.set(imageId, img);
+  return img;
+}
+
+// ── Performance: volume cache ─────────────────────────────────────────────────
+// Keyed by first imageId + slice count. Same series → instant return.
+// Invalidated automatically when a different series is opened.
+let _volumeCache    = null;
+let _volumeCacheKey = '';
+
+function _volumeKey(imageIds) {
+  return imageIds[0] + ':' + imageIds.length;
+}
+
+// ── Performance: rAF gate ─────────────────────────────────────────────────────
+// Multiple synchronous calls to updateAllViews() within one event-loop tick
+// (e.g. rapid key-repeat, wheel bursts) collapse into a single paint call.
+let _rafPending = false;
+
 // ── Centralized rendering engine ──────────────────────────────────────────────
 function updateAllViews() {
+  if (!mprVolume || _rafPending) return;
+  _rafPending = true;
+  requestAnimationFrame(_doRender);
+}
+
+function _doRender() {
+  _rafPending = false;
   if (!mprVolume) return;
 
   const v = mprVolume;
-
   xIndex = Math.max(0, Math.min(v.cols   - 1, xIndex));
   yIndex = Math.max(0, Math.min(v.rows   - 1, yIndex));
   zIndex = Math.max(0, Math.min(v.slices - 1, zIndex));
@@ -129,14 +161,20 @@ document.addEventListener('keydown', function(e) {
 // ── Volume builder ────────────────────────────────────────────────────────────
 
 async function buildVolume(imageIds, onProgress) {
+  // Return cached volume if it's the same series
+  const key = _volumeKey(imageIds);
+  if (_volumeCache && _volumeCacheKey === key) {
+    onProgress(100);
+    return _volumeCache;
+  }
+
   const images = [];
   for (let i = 0; i < imageIds.length; i++) {
-    const image = await cornerstone.loadImage(imageIds[i]);
-    images.push(image);
+    images.push(await _loadImage(imageIds[i]));   // served from _imageCache after first load
     onProgress(Math.round((i + 1) / imageIds.length * 100));
   }
 
-  // ── Orientation correction: sort descending by z so slice 0 = superior ──
+  // Orientation correction: sort descending by z so slice 0 = most superior
   const zOf = img => {
     const s = img.data && img.data.string('x00200032');
     return s ? (parseFloat(s.split('\\')[2]) || 0) : 0;
@@ -161,12 +199,16 @@ async function buildVolume(imageIds, onProgress) {
   const sm = (mprSeries && mprSeries.series_metadata) || {};
   const ps = sm.pixel_spacing || [1, 1];
 
-  return {
+  const volume = {
     buffer, rows, cols, slices,
     rowSpacing:     parseFloat(ps[0])              || 1,
     colSpacing:     parseFloat(ps[1])              || 1,
     sliceThickness: parseFloat(sm.slice_thickness) || 1,
   };
+
+  _volumeCache    = volume;
+  _volumeCacheKey = key;
+  return volume;
 }
 
 // ── Reslicing ─────────────────────────────────────────────────────────────────
@@ -258,13 +300,13 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels, crosshair, phys
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, dw, dh);
 
-  // ── Aspect ratio correction ───────────────────────────────────────────────
+  // Aspect ratio correction
   const physAspect = (physW && physH) ? physW / physH : srcW / srcH;
   let baseW, baseH;
   if (dw / dh > physAspect) { baseH = dh; baseW = dh * physAspect; }
   else                       { baseW = dw; baseH = dw / physAspect; }
 
-  // ── Apply per-canvas zoom (scale from centre) ─────────────────────────────
+  // Per-canvas zoom (scale from centre)
   const zoom  = mprCanvasZoom[canvasId] || 1;
   const drawW = baseW * zoom;
   const drawH = baseH * zoom;
@@ -278,11 +320,10 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels, crosshair, phys
   // Save render geometry for click-to-navigate
   mprViewState[canvasId] = { offX, offY, drawW, drawH, srcW, srcH };
 
-  // ── Crosshair overlay ─────────────────────────────────────────────────────
+  // Crosshair overlay
   if (crosshair) {
     const cx = offX + crosshair.x * drawW;
     const cy = offY + crosshair.y * drawH;
-
     ctx.save();
     ctx.strokeStyle = 'rgba(0, 210, 255, 0.85)';
     ctx.lineWidth   = 1;
@@ -292,7 +333,7 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels, crosshair, phys
     ctx.restore();
   }
 
-  // ── Orientation labels ────────────────────────────────────────────────────
+  // Orientation labels
   if (labels) {
     const fs = Math.max(13, Math.floor(dw / 22));
     ctx.font         = `bold ${fs}px sans-serif`;
@@ -318,7 +359,6 @@ function initSlider(sliderId, max, initial, onChange) {
   s.oninput = () => onChange(parseInt(s.value));
 }
 
-// Wheel handler: scroll slices OR zoom the canvas depending on mprWheelMode.
 function attachWheelScroll(canvasId, onScrollDelta) {
   const canvas = document.getElementById(canvasId);
   if (canvas._mprWheelHandler) canvas.removeEventListener('wheel', canvas._mprWheelHandler);
@@ -335,7 +375,6 @@ function attachWheelScroll(canvasId, onScrollDelta) {
   canvas.addEventListener('wheel', canvas._mprWheelHandler, { passive: false });
 }
 
-// Middle mouse click toggles scroll / zoom mode (mirrors 2D viewer behaviour).
 function attachMiddleMouseToggle(canvasId) {
   const canvas = document.getElementById(canvasId);
   if (canvas._mprMiddleHandler) canvas.removeEventListener('mousedown', canvas._mprMiddleHandler);
@@ -346,7 +385,6 @@ function attachMiddleMouseToggle(canvasId) {
     updateMPRModeIndicator();
   };
   canvas.addEventListener('mousedown', canvas._mprMiddleHandler);
-  // Suppress browser's default middle-click autoscroll on each canvas
   canvas.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
 }
 
@@ -369,10 +407,8 @@ function attachClickNav(canvasId, onImageCoords) {
     const state = mprViewState[canvasId];
     if (!state) return;
     const rect = canvas.getBoundingClientRect();
-    // Map CSS pixels → canvas pixels (handles HiDPI / CSS scaling)
     const cx = (e.clientX - rect.left) * (canvas.width  / rect.width);
     const cy = (e.clientY - rect.top)  * (canvas.height / rect.height);
-    // Map canvas pixels → image pixels (zoom already baked into offX/drawW)
     const ix = (cx - state.offX) * state.srcW / state.drawW;
     const iy = (cy - state.offY) * state.srcH / state.drawH;
     if (ix < 0 || iy < 0 || ix >= state.srcW || iy >= state.srcH) return;
