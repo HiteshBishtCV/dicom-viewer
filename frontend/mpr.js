@@ -7,12 +7,12 @@ let mprWC     = 40;
 let mprWW     = 400;
 
 // ── Shared indices (core of MPR) ─────────────────────────────────────────────
-// These represent the current intersection point in 3D space.
-// Every input source (slider, wheel, keyboard) writes to these
-// and calls updateAllViews() — nothing renders directly.
 let xIndex = 0;   // sagittal plane position  (0 … cols-1)
 let yIndex = 0;   // coronal  plane position  (0 … rows-1)
 let zIndex = 0;   // axial    slice  position  (0 … slices-1)
+
+// ── Per-canvas render geometry — populated each frame, used by click handler ─
+const mprViewState = {};
 
 // ── Centralized rendering engine ─────────────────────────────────────────────
 function updateAllViews() {
@@ -20,17 +20,14 @@ function updateAllViews() {
 
   const v = mprVolume;
 
-  // Clamp to valid range
   xIndex = Math.max(0, Math.min(v.cols   - 1, xIndex));
   yIndex = Math.max(0, Math.min(v.rows   - 1, yIndex));
   zIndex = Math.max(0, Math.min(v.slices - 1, zIndex));
 
-  // Sync all sliders
   document.getElementById('axialSlider').value    = zIndex;
   document.getElementById('coronalSlider').value  = yIndex;
   document.getElementById('sagittalSlider').value = xIndex;
 
-  // Re-render all three planes
   renderAxial(zIndex);
   renderCoronal(yIndex);
   renderSagittal(xIndex);
@@ -41,7 +38,6 @@ function updateAllViews() {
 async function showMPRView(series, imageIds) {
   mprSeries = series;
 
-  // Sync W/L from the 2D viewer
   const vp = cornerstone.getViewport(document.getElementById('dicomImage'));
   if (vp) { mprWC = Math.round(vp.voi.windowCenter); mprWW = Math.round(vp.voi.windowWidth); }
 
@@ -51,20 +47,36 @@ async function showMPRView(series, imageIds) {
 
   mprVolume = await buildVolume(imageIds, setMPRProgress);
 
-  // Start at midpoint
   xIndex = Math.floor(mprVolume.cols   / 2);
   yIndex = Math.floor(mprVolume.rows   / 2);
   zIndex = Math.floor(mprVolume.slices / 2);
 
-  // Wire up sliders — each writes its index and calls updateAllViews()
   initSlider('axialSlider',    mprVolume.slices - 1, zIndex, v => { zIndex = v; updateAllViews(); });
   initSlider('coronalSlider',  mprVolume.rows   - 1, yIndex, v => { yIndex = v; updateAllViews(); });
   initSlider('sagittalSlider', mprVolume.cols   - 1, xIndex, v => { xIndex = v; updateAllViews(); });
 
-  // Wire up mouse-wheel on each canvas
   attachWheelScroll('axialCanvas',    (d) => { zIndex += d; updateAllViews(); });
   attachWheelScroll('coronalCanvas',  (d) => { yIndex += d; updateAllViews(); });
   attachWheelScroll('sagittalCanvas', (d) => { xIndex += d; updateAllViews(); });
+
+  // ── Feature 10: Mouse click navigation ───────────────────────────────────
+  // Each view maps its image-space click back to volume indices.
+  // Horizontal flip in coronal/sagittal is inverted: xImg = (size-1) - volumeIndex.
+  attachClickNav('axialCanvas', (ix, iy) => {
+    xIndex = Math.round(ix);
+    yIndex = Math.round(iy);
+    updateAllViews();
+  });
+  attachClickNav('coronalCanvas', (ix, iy) => {
+    xIndex = mprVolume.cols - 1 - Math.round(ix);   // un-flip horizontal
+    zIndex = Math.round(iy);
+    updateAllViews();
+  });
+  attachClickNav('sagittalCanvas', (ix, iy) => {
+    yIndex = mprVolume.rows - 1 - Math.round(ix);   // un-flip horizontal
+    zIndex = Math.round(iy);
+    updateAllViews();
+  });
 
   updateAllViews();
 }
@@ -80,13 +92,8 @@ function applyMPRPreset(wc, ww) {
 }
 
 // ── Keyboard navigation ───────────────────────────────────────────────────────
-// Arrow Up/Down  → axial (z)        move through slices
-// Arrow Left/Right → sagittal (x)   move left/right
-// W / S          → coronal (y)      move anterior/posterior
 document.addEventListener('keydown', function(e) {
   if (!mprVolume || document.getElementById('mprSection').style.display === 'none') return;
-
-  // Don't hijack input fields
   if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
 
   let changed = true;
@@ -100,10 +107,7 @@ document.addEventListener('keydown', function(e) {
     default: changed = false;
   }
 
-  if (changed) {
-    e.preventDefault();
-    updateAllViews();
-  }
+  if (changed) { e.preventDefault(); updateAllViews(); }
 });
 
 // ── Volume builder ────────────────────────────────────────────────────────────
@@ -115,6 +119,16 @@ async function buildVolume(imageIds, onProgress) {
     images.push(image);
     onProgress(Math.round((i + 1) / imageIds.length * 100));
   }
+
+  // ── Feature 11: Orientation correction ───────────────────────────────────
+  // Read ImagePositionPatient (0020,0032) from each slice.
+  // Sort descending by z so slice 0 = most superior → "S" label at top is always correct,
+  // regardless of whether the scanner acquired head-first or feet-first.
+  const zOf = img => {
+    const s = img.data && img.data.string('x00200032');
+    return s ? (parseFloat(s.split('\\')[2]) || 0) : 0;
+  };
+  images.sort((a, b) => zOf(b) - zOf(a));   // descending z → superior first
 
   const rows   = images[0].rows;
   const cols   = images[0].columns;
@@ -145,10 +159,22 @@ async function buildVolume(imageIds, onProgress) {
 // ── Reslicing ─────────────────────────────────────────────────────────────────
 
 function renderAxial(z) {
-  const v    = mprVolume;
-  const size = v.rows * v.cols;
+  const v     = mprVolume;
+  const size  = v.rows * v.cols;
   const slice = v.buffer.subarray(z * size, (z + 1) * size);
-  renderToCanvas(slice, v.cols, v.rows, 'axialCanvas', { left: 'R', right: 'L' });
+
+  // Crosshair: xIndex is at pixel column xIndex, yIndex at pixel row yIndex
+  const crosshair = {
+    x: xIndex / Math.max(1, v.cols - 1),
+    y: yIndex / Math.max(1, v.rows - 1),
+  };
+
+  renderToCanvas(slice, v.cols, v.rows, 'axialCanvas',
+    { left: 'R', right: 'L' },
+    crosshair,
+    v.cols * v.colSpacing,   // physical width  (mm)
+    v.rows * v.rowSpacing);  // physical height (mm)
+
   document.getElementById('axialLabel').textContent = `AXIAL  —  z ${z + 1} / ${v.slices}`;
 }
 
@@ -159,11 +185,22 @@ function renderCoronal(y) {
     const srcRow = s * v.rows * v.cols + y * v.cols;
     const dstRow = s * v.cols;
     for (let c = 0; c < v.cols; c++) {
-      data[dstRow + (v.cols - 1 - c)] = v.buffer[srcRow + c];  // horizontal flip
+      data[dstRow + (v.cols - 1 - c)] = v.buffer[srcRow + c];   // horizontal flip → L on left
     }
   }
+
+  // After flip: column xIndex appears at image-x = (cols-1 - xIndex)
+  const crosshair = {
+    x: (v.cols - 1 - xIndex) / Math.max(1, v.cols - 1),
+    y: zIndex / Math.max(1, v.slices - 1),
+  };
+
   renderToCanvas(data, v.cols, v.slices, 'coronalCanvas',
-    { left: 'L', right: 'R', top: 'S', bottom: 'I' });
+    { left: 'L', right: 'R', top: 'S', bottom: 'I' },
+    crosshair,
+    v.cols   * v.colSpacing,      // physical width  (mm)
+    v.slices * v.sliceThickness); // physical height (mm)
+
   document.getElementById('coronalLabel').textContent = `CORONAL  —  y ${y + 1} / ${v.rows}`;
 }
 
@@ -173,17 +210,28 @@ function renderSagittal(x) {
   for (let s = 0; s < v.slices; s++) {
     const dstRow = s * v.rows;
     for (let r = 0; r < v.rows; r++) {
-      data[dstRow + (v.rows - 1 - r)] = v.buffer[s * v.rows * v.cols + r * v.cols + x]; // horizontal flip
+      data[dstRow + (v.rows - 1 - r)] = v.buffer[s * v.rows * v.cols + r * v.cols + x];  // horizontal flip → A on right
     }
   }
+
+  // After flip: row yIndex appears at image-x = (rows-1 - yIndex)
+  const crosshair = {
+    x: (v.rows - 1 - yIndex) / Math.max(1, v.rows - 1),
+    y: zIndex / Math.max(1, v.slices - 1),
+  };
+
   renderToCanvas(data, v.rows, v.slices, 'sagittalCanvas',
-    { left: 'P', right: 'A', top: 'S', bottom: 'I' });
+    { left: 'P', right: 'A', top: 'S', bottom: 'I' },
+    crosshair,
+    v.rows   * v.rowSpacing,      // physical width  (mm)
+    v.slices * v.sliceThickness); // physical height (mm)
+
   document.getElementById('sagittalLabel').textContent = `SAGITTAL  —  x ${x + 1} / ${v.cols}`;
 }
 
 // ── Canvas renderer ───────────────────────────────────────────────────────────
 
-function renderToCanvas(pixelData, srcW, srcH, canvasId, labels) {
+function renderToCanvas(pixelData, srcW, srcH, canvasId, labels, crosshair, physW, physH) {
   const canvas = document.getElementById(canvasId);
   const low    = mprWC - mprWW / 2;
   const range  = mprWW;
@@ -210,16 +258,46 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, dw, dh);
 
-  const scale = Math.min(dw / srcW, dh / srcH);
-  const drawW = srcW * scale;
-  const drawH = srcH * scale;
-  const offX  = (dw - drawW) / 2;
-  const offY  = (dh - drawH) / 2;
+  // ── Feature 12: Aspect ratio correction ──────────────────────────────────
+  // Scale using physical mm dimensions so 1 mm in x and 1 mm in y occupy
+  // the same number of screen pixels (corrects thick-slice stretch in
+  // coronal/sagittal where sliceThickness >> pixelSpacing).
+  const physAspect = (physW && physH) ? physW / physH : srcW / srcH;
+  let drawW, drawH;
+  if (dw / dh > physAspect) {
+    drawH = dh;
+    drawW = dh * physAspect;
+  } else {
+    drawW = dw;
+    drawH = dw / physAspect;
+  }
+  const offX = (dw - drawW) / 2;
+  const offY = (dh - drawH) / 2;
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(offscreen, offX, offY, drawW, drawH);
 
+  // Save geometry so attachClickNav can convert canvas coords → image coords
+  mprViewState[canvasId] = { offX, offY, drawW, drawH, srcW, srcH };
+
+  // ── Feature 9: Crosshair overlay ─────────────────────────────────────────
+  if (crosshair) {
+    const cx = offX + crosshair.x * drawW;
+    const cy = offY + crosshair.y * drawH;
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(0, 210, 255, 0.85)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([6, 4]);
+
+    ctx.beginPath(); ctx.moveTo(cx, offY);         ctx.lineTo(cx, offY + drawH); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(offX, cy);          ctx.lineTo(offX + drawW, cy); ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // ── Orientation labels ────────────────────────────────────────────────────
   if (labels) {
     const fs = Math.max(13, Math.floor(dw / 22));
     ctx.font         = `bold ${fs}px sans-serif`;
@@ -227,10 +305,10 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels) {
     ctx.shadowColor  = '#000';
     ctx.shadowBlur   = 4;
     ctx.textBaseline = 'middle';
-    if (labels.left)   { ctx.textAlign = 'left';   ctx.fillText(labels.left,   offX + 6,          offY + drawH / 2); }
-    if (labels.right)  { ctx.textAlign = 'right';  ctx.fillText(labels.right,  offX + drawW - 6,  offY + drawH / 2); }
-    if (labels.top)    { ctx.textAlign = 'center'; ctx.fillText(labels.top,    offX + drawW / 2,  offY + fs); }
-    if (labels.bottom) { ctx.textAlign = 'center'; ctx.fillText(labels.bottom, offX + drawW / 2,  offY + drawH - fs / 2); }
+    if (labels.left)   { ctx.textAlign = 'left';   ctx.fillText(labels.left,   offX + 6,         offY + drawH / 2); }
+    if (labels.right)  { ctx.textAlign = 'right';  ctx.fillText(labels.right,  offX + drawW - 6, offY + drawH / 2); }
+    if (labels.top)    { ctx.textAlign = 'center'; ctx.fillText(labels.top,    offX + drawW / 2, offY + fs); }
+    if (labels.bottom) { ctx.textAlign = 'center'; ctx.fillText(labels.bottom, offX + drawW / 2, offY + drawH - fs / 2); }
     ctx.shadowBlur = 0;
   }
 }
@@ -246,10 +324,29 @@ function initSlider(sliderId, max, initial, onChange) {
 }
 
 function attachWheelScroll(canvasId, onDelta) {
-  document.getElementById(canvasId).addEventListener('wheel', function(e) {
-    e.preventDefault();
-    onDelta(e.deltaY > 0 ? 1 : -1);
-  }, { passive: false });
+  const canvas = document.getElementById(canvasId);
+  if (canvas._mprWheelHandler) canvas.removeEventListener('wheel', canvas._mprWheelHandler);
+  canvas._mprWheelHandler = e => { e.preventDefault(); onDelta(e.deltaY > 0 ? 1 : -1); };
+  canvas.addEventListener('wheel', canvas._mprWheelHandler, { passive: false });
+}
+
+function attachClickNav(canvasId, onImageCoords) {
+  const canvas = document.getElementById(canvasId);
+  if (canvas._mprClickHandler) canvas.removeEventListener('click', canvas._mprClickHandler);
+  canvas._mprClickHandler = function(e) {
+    const state = mprViewState[canvasId];
+    if (!state) return;
+    const rect = canvas.getBoundingClientRect();
+    // Map CSS pixels → canvas pixels (handles HiDPI / CSS scaling)
+    const cx = (e.clientX - rect.left) * (canvas.width  / rect.width);
+    const cy = (e.clientY - rect.top)  * (canvas.height / rect.height);
+    // Map canvas pixels → image pixels
+    const ix = (cx - state.offX) * state.srcW / state.drawW;
+    const iy = (cy - state.offY) * state.srcH / state.drawH;
+    if (ix < 0 || iy < 0 || ix >= state.srcW || iy >= state.srcH) return;
+    onImageCoords(ix, iy);
+  };
+  canvas.addEventListener('click', canvas._mprClickHandler);
 }
 
 function setMPRProgress(pct) {
