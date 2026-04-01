@@ -6,7 +6,7 @@ let mprSeries = null;
 let mprWC     = 40;
 let mprWW     = 400;
 
-// ── Shared indices (core of MPR) ─────────────────────────────────────────────
+// ── Shared indices ────────────────────────────────────────────────────────────
 let xIndex = 0;   // sagittal plane position  (0 … cols-1)
 let yIndex = 0;   // coronal  plane position  (0 … rows-1)
 let zIndex = 0;   // axial    slice  position  (0 … slices-1)
@@ -14,7 +14,12 @@ let zIndex = 0;   // axial    slice  position  (0 … slices-1)
 // ── Per-canvas render geometry — populated each frame, used by click handler ─
 const mprViewState = {};
 
-// ── Centralized rendering engine ─────────────────────────────────────────────
+// ── Zoom state ────────────────────────────────────────────────────────────────
+// Each canvas keeps its own zoom level; mode is shared (one toggle affects all).
+let mprWheelMode = 'scroll';   // 'scroll' | 'zoom'
+const mprCanvasZoom = { axialCanvas: 1, coronalCanvas: 1, sagittalCanvas: 1 };
+
+// ── Centralized rendering engine ──────────────────────────────────────────────
 function updateAllViews() {
   if (!mprVolume) return;
 
@@ -51,6 +56,11 @@ async function showMPRView(series, imageIds) {
   yIndex = Math.floor(mprVolume.rows   / 2);
   zIndex = Math.floor(mprVolume.slices / 2);
 
+  // Reset zoom and mode on every entry
+  mprCanvasZoom.axialCanvas = mprCanvasZoom.coronalCanvas = mprCanvasZoom.sagittalCanvas = 1;
+  mprWheelMode = 'scroll';
+  updateMPRModeIndicator();
+
   initSlider('axialSlider',    mprVolume.slices - 1, zIndex, v => { zIndex = v; updateAllViews(); });
   initSlider('coronalSlider',  mprVolume.rows   - 1, yIndex, v => { yIndex = v; updateAllViews(); });
   initSlider('sagittalSlider', mprVolume.cols   - 1, xIndex, v => { xIndex = v; updateAllViews(); });
@@ -59,9 +69,10 @@ async function showMPRView(series, imageIds) {
   attachWheelScroll('coronalCanvas',  (d) => { yIndex += d; updateAllViews(); });
   attachWheelScroll('sagittalCanvas', (d) => { xIndex += d; updateAllViews(); });
 
-  // ── Feature 10: Mouse click navigation ───────────────────────────────────
-  // Each view maps its image-space click back to volume indices.
-  // Horizontal flip in coronal/sagittal is inverted: xImg = (size-1) - volumeIndex.
+  attachMiddleMouseToggle('axialCanvas');
+  attachMiddleMouseToggle('coronalCanvas');
+  attachMiddleMouseToggle('sagittalCanvas');
+
   attachClickNav('axialCanvas', (ix, iy) => {
     xIndex = Math.round(ix);
     yIndex = Math.round(iy);
@@ -88,6 +99,11 @@ function exitMPR() {
 
 function applyMPRPreset(wc, ww) {
   mprWC = wc; mprWW = ww;
+  updateAllViews();
+}
+
+function resetMPRZoom() {
+  mprCanvasZoom.axialCanvas = mprCanvasZoom.coronalCanvas = mprCanvasZoom.sagittalCanvas = 1;
   updateAllViews();
 }
 
@@ -120,15 +136,12 @@ async function buildVolume(imageIds, onProgress) {
     onProgress(Math.round((i + 1) / imageIds.length * 100));
   }
 
-  // ── Feature 11: Orientation correction ───────────────────────────────────
-  // Read ImagePositionPatient (0020,0032) from each slice.
-  // Sort descending by z so slice 0 = most superior → "S" label at top is always correct,
-  // regardless of whether the scanner acquired head-first or feet-first.
+  // ── Orientation correction: sort descending by z so slice 0 = superior ──
   const zOf = img => {
     const s = img.data && img.data.string('x00200032');
     return s ? (parseFloat(s.split('\\')[2]) || 0) : 0;
   };
-  images.sort((a, b) => zOf(b) - zOf(a));   // descending z → superior first
+  images.sort((a, b) => zOf(b) - zOf(a));
 
   const rows   = images[0].rows;
   const cols   = images[0].columns;
@@ -162,19 +175,14 @@ function renderAxial(z) {
   const v     = mprVolume;
   const size  = v.rows * v.cols;
   const slice = v.buffer.subarray(z * size, (z + 1) * size);
-
-  // Crosshair: xIndex is at pixel column xIndex, yIndex at pixel row yIndex
   const crosshair = {
     x: xIndex / Math.max(1, v.cols - 1),
     y: yIndex / Math.max(1, v.rows - 1),
   };
-
   renderToCanvas(slice, v.cols, v.rows, 'axialCanvas',
     { left: 'R', right: 'L' },
     crosshair,
-    v.cols * v.colSpacing,   // physical width  (mm)
-    v.rows * v.rowSpacing);  // physical height (mm)
-
+    v.cols * v.colSpacing, v.rows * v.rowSpacing);
   document.getElementById('axialLabel').textContent = `AXIAL  —  z ${z + 1} / ${v.slices}`;
 }
 
@@ -188,19 +196,15 @@ function renderCoronal(y) {
       data[dstRow + (v.cols - 1 - c)] = v.buffer[srcRow + c];   // horizontal flip → L on left
     }
   }
-
-  // After flip: column xIndex appears at image-x = (cols-1 - xIndex)
   const crosshair = {
     x: (v.cols - 1 - xIndex) / Math.max(1, v.cols - 1),
     y: zIndex / Math.max(1, v.slices - 1),
   };
-
   renderToCanvas(data, v.cols, v.slices, 'coronalCanvas',
     { left: 'L', right: 'R', top: 'S', bottom: 'I' },
     crosshair,
-    v.cols   * v.colSpacing,      // physical width  (mm)
-    v.slices * v.sliceThickness); // physical height (mm)
-
+    v.cols   * v.colSpacing,
+    v.slices * v.sliceThickness);
   document.getElementById('coronalLabel').textContent = `CORONAL  —  y ${y + 1} / ${v.rows}`;
 }
 
@@ -213,19 +217,15 @@ function renderSagittal(x) {
       data[dstRow + (v.rows - 1 - r)] = v.buffer[s * v.rows * v.cols + r * v.cols + x];  // horizontal flip → A on right
     }
   }
-
-  // After flip: row yIndex appears at image-x = (rows-1 - yIndex)
   const crosshair = {
     x: (v.rows - 1 - yIndex) / Math.max(1, v.rows - 1),
     y: zIndex / Math.max(1, v.slices - 1),
   };
-
   renderToCanvas(data, v.rows, v.slices, 'sagittalCanvas',
     { left: 'P', right: 'A', top: 'S', bottom: 'I' },
     crosshair,
-    v.rows   * v.rowSpacing,      // physical width  (mm)
-    v.slices * v.sliceThickness); // physical height (mm)
-
+    v.rows   * v.rowSpacing,
+    v.slices * v.sliceThickness);
   document.getElementById('sagittalLabel').textContent = `SAGITTAL  —  x ${x + 1} / ${v.cols}`;
 }
 
@@ -258,30 +258,27 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels, crosshair, phys
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, dw, dh);
 
-  // ── Feature 12: Aspect ratio correction ──────────────────────────────────
-  // Scale using physical mm dimensions so 1 mm in x and 1 mm in y occupy
-  // the same number of screen pixels (corrects thick-slice stretch in
-  // coronal/sagittal where sliceThickness >> pixelSpacing).
+  // ── Aspect ratio correction ───────────────────────────────────────────────
   const physAspect = (physW && physH) ? physW / physH : srcW / srcH;
-  let drawW, drawH;
-  if (dw / dh > physAspect) {
-    drawH = dh;
-    drawW = dh * physAspect;
-  } else {
-    drawW = dw;
-    drawH = dw / physAspect;
-  }
-  const offX = (dw - drawW) / 2;
-  const offY = (dh - drawH) / 2;
+  let baseW, baseH;
+  if (dw / dh > physAspect) { baseH = dh; baseW = dh * physAspect; }
+  else                       { baseW = dw; baseH = dw / physAspect; }
+
+  // ── Apply per-canvas zoom (scale from centre) ─────────────────────────────
+  const zoom  = mprCanvasZoom[canvasId] || 1;
+  const drawW = baseW * zoom;
+  const drawH = baseH * zoom;
+  const offX  = (dw - drawW) / 2;
+  const offY  = (dh - drawH) / 2;
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(offscreen, offX, offY, drawW, drawH);
 
-  // Save geometry so attachClickNav can convert canvas coords → image coords
+  // Save render geometry for click-to-navigate
   mprViewState[canvasId] = { offX, offY, drawW, drawH, srcW, srcH };
 
-  // ── Feature 9: Crosshair overlay ─────────────────────────────────────────
+  // ── Crosshair overlay ─────────────────────────────────────────────────────
   if (crosshair) {
     const cx = offX + crosshair.x * drawW;
     const cy = offY + crosshair.y * drawH;
@@ -290,10 +287,8 @@ function renderToCanvas(pixelData, srcW, srcH, canvasId, labels, crosshair, phys
     ctx.strokeStyle = 'rgba(0, 210, 255, 0.85)';
     ctx.lineWidth   = 1;
     ctx.setLineDash([6, 4]);
-
-    ctx.beginPath(); ctx.moveTo(cx, offY);         ctx.lineTo(cx, offY + drawH); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(offX, cy);          ctx.lineTo(offX + drawW, cy); ctx.stroke();
-
+    ctx.beginPath(); ctx.moveTo(cx, offY);  ctx.lineTo(cx, offY + drawH); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(offX, cy);  ctx.lineTo(offX + drawW, cy); ctx.stroke();
     ctx.restore();
   }
 
@@ -323,11 +318,48 @@ function initSlider(sliderId, max, initial, onChange) {
   s.oninput = () => onChange(parseInt(s.value));
 }
 
-function attachWheelScroll(canvasId, onDelta) {
+// Wheel handler: scroll slices OR zoom the canvas depending on mprWheelMode.
+function attachWheelScroll(canvasId, onScrollDelta) {
   const canvas = document.getElementById(canvasId);
   if (canvas._mprWheelHandler) canvas.removeEventListener('wheel', canvas._mprWheelHandler);
-  canvas._mprWheelHandler = e => { e.preventDefault(); onDelta(e.deltaY > 0 ? 1 : -1); };
+  canvas._mprWheelHandler = function(e) {
+    e.preventDefault();
+    if (mprWheelMode === 'zoom') {
+      const factor = e.deltaY > 0 ? 0.9 : 1.1;
+      mprCanvasZoom[canvasId] = Math.max(0.5, Math.min(8, mprCanvasZoom[canvasId] * factor));
+      updateAllViews();
+    } else {
+      onScrollDelta(e.deltaY > 0 ? 1 : -1);
+    }
+  };
   canvas.addEventListener('wheel', canvas._mprWheelHandler, { passive: false });
+}
+
+// Middle mouse click toggles scroll / zoom mode (mirrors 2D viewer behaviour).
+function attachMiddleMouseToggle(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  if (canvas._mprMiddleHandler) canvas.removeEventListener('mousedown', canvas._mprMiddleHandler);
+  canvas._mprMiddleHandler = function(e) {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    mprWheelMode = mprWheelMode === 'scroll' ? 'zoom' : 'scroll';
+    updateMPRModeIndicator();
+  };
+  canvas.addEventListener('mousedown', canvas._mprMiddleHandler);
+  // Suppress browser's default middle-click autoscroll on each canvas
+  canvas.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
+}
+
+function updateMPRModeIndicator() {
+  const el = document.getElementById('mprModeIndicator');
+  if (!el) return;
+  if (mprWheelMode === 'zoom') {
+    el.textContent = '🔍 Zoom mode  (middle-click to switch)';
+    el.style.color = '#ffd54f';
+  } else {
+    el.textContent = '↕ Scroll mode  (middle-click to switch)';
+    el.style.color = '#aaa';
+  }
 }
 
 function attachClickNav(canvasId, onImageCoords) {
@@ -340,7 +372,7 @@ function attachClickNav(canvasId, onImageCoords) {
     // Map CSS pixels → canvas pixels (handles HiDPI / CSS scaling)
     const cx = (e.clientX - rect.left) * (canvas.width  / rect.width);
     const cy = (e.clientY - rect.top)  * (canvas.height / rect.height);
-    // Map canvas pixels → image pixels
+    // Map canvas pixels → image pixels (zoom already baked into offX/drawW)
     const ix = (cx - state.offX) * state.srcW / state.drawW;
     const iy = (cy - state.offY) * state.srcH / state.drawH;
     if (ix < 0 || iy < 0 || ix >= state.srcW || iy >= state.srcH) return;
