@@ -269,6 +269,8 @@ function renderCoronal(y) {
     v.cols   * v.colSpacing,
     v.slices * v.sliceThickness);
   document.getElementById('coronalLabel').textContent = `CORONAL  —  y ${y + 1} / ${v.rows}`;
+
+  if (_gpuRenderer) _gpuRenderer.renderCoronal(y, mprWC, mprWW);
 }
 
 function renderSagittal(x) {
@@ -290,6 +292,8 @@ function renderSagittal(x) {
     v.rows   * v.rowSpacing,
     v.slices * v.sliceThickness);
   document.getElementById('sagittalLabel').textContent = `SAGITTAL  —  x ${x + 1} / ${v.cols}`;
+
+  if (_gpuRenderer) _gpuRenderer.renderSagittal(x, mprWC, mprWW);
 }
 
 // ── Canvas renderer ───────────────────────────────────────────────────────────

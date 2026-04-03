@@ -87,11 +87,14 @@
     document.body.appendChild(canvas);
 
     // ── 3. Acquire context (WebGL2 preferred) ─────────────────────────────────
-    let gl     = canvas.getContext('webgl2');
+    // preserveDrawingBuffer: allows drawImage() to read the GL canvas after
+    // each render call, used by gpu-slice.js to copy frames to 2D output canvases.
+    const ctxOpts = { preserveDrawingBuffer: true };
+    let gl     = canvas.getContext('webgl2', ctxOpts);
     const webgl2 = !!gl;
     if (!gl) {
-      gl = canvas.getContext('webgl') ||
-           canvas.getContext('experimental-webgl');
+      gl = canvas.getContext('webgl', ctxOpts) ||
+           canvas.getContext('experimental-webgl', ctxOpts);
     }
     if (!gl) {
       document.body.removeChild(canvas);

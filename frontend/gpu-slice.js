@@ -1,24 +1,42 @@
-// gpu-slice.js — GPU axial slice rendering via WebGL shaders.
+// gpu-slice.js — GPU MPR slice rendering (axial · coronal · sagittal).
 //
-// Requires gpu-volume.js to have already uploaded the volume texture.
+// Requires gpu-volume.js (window.gpuVolume) to have uploaded the texture first.
 //
 // Public API (window.gpuSlice):
 //   init(gpuHandle) → SliceRenderer | null
 //
 // SliceRenderer:
-//   renderAxial(z, wc, ww)   — render axial slice z with window centre/width
-//   destroy()                — remove canvas from DOM, free GL resources
+//   renderAxial(z, wc, ww)
+//   renderCoronal(y, wc, ww)
+//   renderSagittal(x, wc, ww)
+//   destroy()
 //
-// The GPU canvas is inserted into the axial mprPane automatically.
-// The existing CPU axialCanvas is untouched.
+// Strategy:
+//   WebGL2  — one parameterised TEXTURE_3D shader covers all three planes.
+//             Per-plane origin/dx/dy uniforms encode the texture axis mapping.
+//             Renders into the hidden gpuHandle.canvas, then drawImage() copies
+//             the result to a per-plane visible 2-D canvas.
+//   WebGL1  — 2-D atlas can only support axial efficiently; coronal and sagittal
+//             are no-ops (CPU path continues for those planes unchanged).
+//
+// Texture coordinate derivation (3-D texture, WebGL2):
+//   data[0] → texel (u=0, v=0, w=0).  Row 0 of each slice lands at v=0 (GL
+//   bottom), slice 0 at w=0.  Screen UV: v_uv=a_pos*0.5+0.5, so (0,0)=screen
+//   bottom-left, (1,1)=top-right.
+//
+//   Axial   (w fixed):  u=v_uv.x,   v=1-v_uv.y,  w=(z+.5)/D
+//     origin=(0,1,w)   dx=(1,0,0)   dy=(0,-1,0)
+//
+//   Coronal (v fixed, L-on-left flip, slice-0 at top):
+//     origin=(1,v,1)   dx=(-1,0,0)  dy=(0,0,-1)
+//
+//   Sagittal(u fixed, P-on-left flip, slice-0 at top):
+//     origin=(u,1,1)   dx=(0,-1,0)  dy=(0,0,-1)
 
 (function (global) {
   'use strict';
 
-  // ── Vertex shaders ──────────────────────────────────────────────────────────
-  // Draws a fullscreen quad (6 verts, 2 triangles) covering NDC [-1,1]×[-1,1].
-  // UV: (0,0)=bottom-left, (1,1)=top-right — standard WebGL convention.
-
+  // ── Vertex shaders (unchanged from before) ──────────────────────────────────
   const VERT_GL2 = `#version 300 es
     in  vec2 a_pos;
     out vec2 v_uv;
@@ -37,40 +55,35 @@
     }
   `;
 
-  // ── Fragment shaders ────────────────────────────────────────────────────────
-
-  // WebGL2 — samples TEXTURE_3D.
-  // Row 0 of the image was uploaded as the first element of the buffer, which
-  // lands at texture v=0 (bottom).  Flipping (1.0 - v_uv.y) maps screen-top
-  // to v=0, so row 0 appears at the top of the display — matching the CPU path.
+  // ── Fragment shader — WebGL2 ────────────────────────────────────────────────
+  // Parameterised by origin/dx/dy so one program handles all three planes.
   const FRAG_GL2 = `#version 300 es
     precision mediump float;
     uniform mediump sampler3D u_volume;
-    uniform float u_sliceZ;  // normalised [0,1]: (z + 0.5) / depth
+    uniform vec3  u_origin;  // texture coord at screen (0,0) = bottom-left
+    uniform vec3  u_dx;      // texture coord delta per unit v_uv.x
+    uniform vec3  u_dy;      // texture coord delta per unit v_uv.y
     uniform float u_wc;      // window centre (HU)
     uniform float u_ww;      // window width  (HU)
-    uniform float u_min;     // HU value stored as texture 0.0
-    uniform float u_max;     // HU value stored as texture 1.0
+    uniform float u_min;     // HU value stored as tex 0.0
+    uniform float u_max;     // HU value stored as tex 1.0
     in  vec2 v_uv;
     out vec4 fragColor;
     void main() {
-      float norm = texture(u_volume, vec3(v_uv.x, 1.0 - v_uv.y, u_sliceZ)).r;
-      float hu   = norm * (u_max - u_min) + u_min;
-      float val  = clamp((hu - (u_wc - u_ww * 0.5)) / u_ww, 0.0, 1.0);
-      fragColor  = vec4(val, val, val, 1.0);
+      vec3  coord = u_origin + v_uv.x * u_dx + v_uv.y * u_dy;
+      float norm  = texture(u_volume, coord).r;
+      float hu    = norm * (u_max - u_min) + u_min;
+      float val   = clamp((hu - (u_wc - u_ww * 0.5)) / u_ww, 0.0, 1.0);
+      fragColor   = vec4(val, val, val, 1.0);
     }
   `;
 
-  // WebGL1 — samples TEXTURE_2D atlas (slices stacked bottom-to-top in GPU memory).
-  // Atlas layout: slice z occupies v ∈ [z/depth, (z+1)/depth].
-  // Row 0 of slice z (top of image) sits at atlas v = z/depth.
-  // Screen-top (v_uv.y=1) must map to v=z/depth, giving:
-  //   atlas_v = (u_sliceIdx + 1.0 - v_uv.y) / u_depth
+  // ── Fragment shader — WebGL1 (axial via 2-D atlas only) ────────────────────
   const FRAG_GL1 = `
     precision mediump float;
     uniform sampler2D u_volume;
-    uniform float u_sliceIdx; // integer slice index (0..depth-1) passed as float
-    uniform float u_depth;    // total slice count
+    uniform float u_sliceIdx;
+    uniform float u_depth;
     uniform float u_wc;
     uniform float u_ww;
     uniform float u_min;
@@ -94,7 +107,7 @@
     if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
       const log = gl.getShaderInfoLog(sh);
       gl.deleteShader(sh);
-      throw new Error('gpuSlice shader compile:\n' + log);
+      throw new Error('gpuSlice compile:\n' + log);
     }
     return sh;
   }
@@ -111,35 +124,46 @@
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
       const log = gl.getProgramInfoLog(prog);
       gl.deleteProgram(prog);
-      throw new Error('gpuSlice program link:\n' + log);
+      throw new Error('gpuSlice link:\n' + log);
     }
     return prog;
   }
 
+  // ── DOM helper — create a labelled output canvas in an mprPane ─────────────
+  function _makeOutputCanvas(siblingId, labelText) {
+    const sibling = document.getElementById(siblingId);
+    const pane    = sibling && sibling.closest('.mprPane');
+    const out     = document.createElement('canvas');
+    out.style.cssText = 'width:100%;aspect-ratio:1/1;background:#000;display:block;';
+    if (pane) {
+      const lbl       = document.createElement('div');
+      lbl.className   = 'mprLabel';
+      lbl.textContent = labelText;
+      lbl.style.color = '#81c784';   // green distinguishes GPU from CPU label
+      pane.appendChild(lbl);
+      pane.appendChild(out);
+    }
+    return out;
+  }
+
   // ── init ────────────────────────────────────────────────────────────────────
 
-  /**
-   * Build a SliceRenderer from an existing GpuVolumeHandle.
-   * @param {object} gpuHandle  — returned by gpuVolume.uploadVolumeToGPU()
-   * @returns {object|null}     — SliceRenderer, or null on any failure
-   */
   function init(gpuHandle) {
     if (!gpuHandle) return null;
 
-    const { gl, canvas, texture, depth, min, max, webgl2 } = gpuHandle;
+    const { gl, canvas: glCanvas, texture, width, height, depth, min, max, webgl2 } = gpuHandle;
 
     // ── Build shader program ────────────────────────────────────────────────
     let prog;
     try {
-      prog = webgl2
-        ? _link(gl, VERT_GL2, FRAG_GL2)
-        : _link(gl, VERT_GL1, FRAG_GL1);
+      prog = webgl2 ? _link(gl, VERT_GL2, FRAG_GL2)
+                    : _link(gl, VERT_GL1, FRAG_GL1);
     } catch (e) {
       console.warn('gpuSlice: shader build failed —', e.message);
       return null;
     }
 
-    // ── Fullscreen quad buffer ──────────────────────────────────────────────
+    // ── Fullscreen quad ─────────────────────────────────────────────────────
     const quadBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
@@ -147,52 +171,37 @@
       -1,  1,   1, -1,    1,  1,
     ]), gl.STATIC_DRAW);
 
-    // ── Cache uniform / attribute locations ────────────────────────────────
+    // ── Uniform / attribute locations ───────────────────────────────────────
     const a_pos    = gl.getAttribLocation(prog,  'a_pos');
     const u_volume = gl.getUniformLocation(prog, 'u_volume');
     const u_wc     = gl.getUniformLocation(prog, 'u_wc');
     const u_ww     = gl.getUniformLocation(prog, 'u_ww');
     const u_min    = gl.getUniformLocation(prog, 'u_min');
     const u_max    = gl.getUniformLocation(prog, 'u_max');
-    // WebGL2 uses u_sliceZ (0..1); WebGL1 uses u_sliceIdx + u_depth.
-    const u_sliceZ   = webgl2 ? gl.getUniformLocation(prog, 'u_sliceZ')   : null;
+
+    // WebGL2-only uniforms (plane parameterisation)
+    const u_origin   = webgl2 ? gl.getUniformLocation(prog, 'u_origin')   : null;
+    const u_dx       = webgl2 ? gl.getUniformLocation(prog, 'u_dx')       : null;
+    const u_dy       = webgl2 ? gl.getUniformLocation(prog, 'u_dy')       : null;
+    // WebGL1-only uniforms (axial atlas)
     const u_sliceIdx = webgl2 ? null : gl.getUniformLocation(prog, 'u_sliceIdx');
-    const u_depth_u  = webgl2 ? null : gl.getUniformLocation(prog, 'u_depth');
+    const u_depthU   = webgl2 ? null : gl.getUniformLocation(prog, 'u_depth');
 
-    // ── Insert GPU canvas into axial pane ──────────────────────────────────
-    // The gpuHandle canvas lives in document.body (hidden). Move it into the
-    // axial mprPane so it appears directly below the CPU canvas.
-    const axialEl = document.getElementById('axialCanvas');
-    const pane    = axialEl && axialEl.closest('.mprPane');
-    if (pane) {
-      const label       = document.createElement('div');
-      label.className   = 'mprLabel';
-      label.textContent = 'AXIAL \u00b7 GPU (' + (webgl2 ? 'WebGL2 · 3D tex' : 'WebGL1 · atlas') + ')';
-      label.style.color = '#81c784';  // green to distinguish from CPU label
+    // ── Output canvases (visible 2-D; glCanvas is the hidden render target) ─
+    const axialOut    = _makeOutputCanvas('axialCanvas',    'AXIAL \u00b7 GPU');
+    const coronalOut  = webgl2 ? _makeOutputCanvas('coronalCanvas',  'CORONAL \u00b7 GPU') : null;
+    const sagittalOut = webgl2 ? _makeOutputCanvas('sagittalCanvas', 'SAGITTAL \u00b7 GPU') : null;
 
-      canvas.style.cssText = 'width:100%;aspect-ratio:1/1;background:#000;display:block;';
-      pane.appendChild(label);
-      pane.appendChild(canvas);
-    } else {
-      // Fallback: make it visible in body if pane not found yet
-      canvas.style.cssText = 'width:300px;height:300px;background:#000;display:block;margin-top:8px;';
-    }
-
-    // ── renderAxial ─────────────────────────────────────────────────────────
-
-    /**
-     * Render axial slice z with window centre wc and window width ww.
-     * @param {number} z   — slice index (0 .. depth-1)
-     * @param {number} wc  — window centre in HU
-     * @param {number} ww  — window width  in HU
-     */
-    function renderAxial(z, wc, ww) {
-      // Match canvas pixel size to its CSS display size.
-      const dw = canvas.clientWidth  || 300;
-      const dh = canvas.clientHeight || 300;
-      if (canvas.width !== dw || canvas.height !== dh) {
-        canvas.width  = dw;
-        canvas.height = dh;
+    // ── Core draw helper (WebGL2 only) ──────────────────────────────────────
+    // Resizes glCanvas to match out, renders with given plane coords, copies.
+    function _drawGL2(origin, dx, dy, wc, ww, out) {
+      const dw = out.clientWidth  || 300;
+      const dh = out.clientHeight || 300;
+      if (out.width  !== dw) out.width  = dw;
+      if (out.height !== dh) out.height = dh;
+      if (glCanvas.width !== dw || glCanvas.height !== dh) {
+        glCanvas.width  = dw;
+        glCanvas.height = dh;
       }
 
       gl.viewport(0, 0, dw, dh);
@@ -200,43 +209,104 @@
       gl.clear(gl.COLOR_BUFFER_BIT);
 
       gl.useProgram(prog);
-
-      // Bind volume texture to unit 0
-      const target = webgl2 ? gl.TEXTURE_3D : gl.TEXTURE_2D;
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(target, texture);
+      gl.bindTexture(gl.TEXTURE_3D, texture);
       gl.uniform1i(u_volume, 0);
 
-      // Slice position
-      if (webgl2) {
-        gl.uniform1f(u_sliceZ, (z + 0.5) / depth);
-      } else {
-        gl.uniform1f(u_sliceIdx, z);
-        gl.uniform1f(u_depth_u,  depth);
-      }
-
-      // W/L + HU range
+      gl.uniform3fv(u_origin, origin);
+      gl.uniform3fv(u_dx,     dx);
+      gl.uniform3fv(u_dy,     dy);
       gl.uniform1f(u_wc,  wc);
       gl.uniform1f(u_ww,  ww);
       gl.uniform1f(u_min, min);
       gl.uniform1f(u_max, max);
 
-      // Draw fullscreen quad
       gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
       gl.enableVertexAttribArray(a_pos);
       gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      // Copy rendered frame from GL canvas → visible 2-D output canvas.
+      out.getContext('2d').drawImage(glCanvas, 0, 0, dw, dh);
     }
 
-    // ── destroy ─────────────────────────────────────────────────────────────
+    // ── Public render functions ─────────────────────────────────────────────
+
+    function renderAxial(z, wc, ww) {
+      if (webgl2) {
+        const w = (z + 0.5) / depth;
+        _drawGL2(
+          [0, 1, w],    // origin: u=0, v=1(flipped), w=slice
+          [1, 0, 0],    // dx:     u increases right
+          [0, -1, 0],   // dy:     v decreases going up (row 0 at top)
+          wc, ww, axialOut
+        );
+      } else {
+        // WebGL1 atlas path (unchanged from original)
+        const dw = axialOut.clientWidth  || 300;
+        const dh = axialOut.clientHeight || 300;
+        if (axialOut.width  !== dw) axialOut.width  = dw;
+        if (axialOut.height !== dh) axialOut.height = dh;
+        if (glCanvas.width !== dw || glCanvas.height !== dh) {
+          glCanvas.width  = dw;
+          glCanvas.height = dh;
+        }
+        gl.viewport(0, 0, dw, dh);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(prog);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.uniform1i(u_volume, 0);
+        gl.uniform1f(u_sliceIdx, z);
+        gl.uniform1f(u_depthU,   depth);
+        gl.uniform1f(u_wc,  wc);
+        gl.uniform1f(u_ww,  ww);
+        gl.uniform1f(u_min, min);
+        gl.uniform1f(u_max, max);
+        gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+        gl.enableVertexAttribArray(a_pos);
+        gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        axialOut.getContext('2d').drawImage(glCanvas, 0, 0, dw, dh);
+      }
+    }
+
+    function renderCoronal(y, wc, ww) {
+      if (!webgl2) return;   // WebGL1: CPU path handles coronal
+      const v = (y + 0.5) / height;
+      _drawGL2(
+        [1, v, 1],    // origin: u=1(L on left), v=fixed row, w=1(last slice at bottom)
+        [-1, 0, 0],   // dx:     u decreases going right (L→R flip)
+        [0, 0, -1],   // dy:     w decreases going up (slice 0 at top)
+        wc, ww, coronalOut
+      );
+    }
+
+    function renderSagittal(x, wc, ww) {
+      if (!webgl2) return;   // WebGL1: CPU path handles sagittal
+      const u = (x + 0.5) / width;
+      _drawGL2(
+        [u, 1, 1],    // origin: u=fixed col, v=1(P on left), w=1(last slice at bottom)
+        [0, -1, 0],   // dx:     v decreases going right (P→A flip)
+        [0, 0, -1],   // dy:     w decreases going up (slice 0 at top)
+        wc, ww, sagittalOut
+      );
+    }
 
     function destroy() {
       gl.deleteProgram(prog);
       gl.deleteBuffer(quadBuf);
-      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      [axialOut, coronalOut, sagittalOut].forEach(c => {
+        if (c && c.parentNode) c.parentNode.removeChild(c);
+      });
+      // Remove the GPU label nodes that were inserted alongside the canvases
+      document.querySelectorAll('.mprLabel').forEach(el => {
+        if (el.style.color === 'rgb(129, 196, 132)') el.remove();
+      });
     }
 
-    return { renderAxial, destroy };
+    return { renderAxial, renderCoronal, renderSagittal, destroy };
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
