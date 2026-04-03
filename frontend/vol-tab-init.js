@@ -113,8 +113,8 @@
     window.addEventListener('mouseleave', () => { dragging = false; });
 
     // ── Globals used by HTML button callbacks ───────────────────────────────
-    window.applyPreset  = (wc, ww) => { curWC = wc; curWW = ww; requestRender(); };
-    window.resetCamera  = ()       => { theta = Math.PI/4; phi = Math.PI/3; requestRender(); };
+    window.setPreset   = name => { renderer.setPreset(name); requestRender(); };
+    window.resetCamera = ()   => { theta = Math.PI/4; phi = Math.PI/3; requestRender(); };
   });
 
   // ── Volume builder (self-contained, no dependency on mpr.js) ───────────────

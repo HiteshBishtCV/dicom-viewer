@@ -67,10 +67,10 @@
     <h2>3D VOLUME — GPU RAY CAST (MIP)</h2>
 
     <div id="controls">
-      <button onclick="applyPreset(-600,1600)">Lung</button>
-      <button onclick="applyPreset(400,1800)">Bone</button>
-      <button onclick="applyPreset(40,400)">Soft Tissue</button>
-      <button onclick="applyPreset(600,2800)">Brain</button>
+      <button onclick="setPreset('bone')">Bone</button>
+      <button onclick="setPreset('softTissue')">Soft Tissue</button>
+      <button onclick="setPreset('lung')">Lung</button>
+      <button onclick="setPreset('mip')">MIP</button>
       <span class="sep">|</span>
       <button onclick="resetCamera()">Reset Camera</button>
     </div>
