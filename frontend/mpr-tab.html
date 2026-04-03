@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>MPR View — DICOM</title>
+
+  <!-- Cornerstone (required by mpr.js / buildVolume) -->
+  <script src="https://unpkg.com/cornerstone-core/dist/cornerstone.js"></script>
+  <script src="https://unpkg.com/dicom-parser/dist/dicomParser.js"></script>
+  <script src="https://unpkg.com/cornerstone-wado-image-loader/dist/cornerstoneWADOImageLoader.bundle.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #1a1a1a; color: #e0e0e0; padding: 16px; }
+
+    /* ── Waiting overlay ── */
+    #mprTabWaiting {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; height: 80vh; gap: 16px;
+    }
+    #mprTabWaiting p { color: #aaa; font-size: 15px; }
+
+    /* ── MPR section ── */
+    #mprSection { display: none; }
+
+    #mprTopBar {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 10px; flex-wrap: wrap; gap: 8px;
+    }
+    #mprTopBar button {
+      background: #2a2a2a; color: #ccc; border: 1px solid #444;
+      padding: 5px 12px; cursor: pointer; border-radius: 4px; font-size: 13px;
+    }
+    #mprTopBar button:hover { background: #3a3a3a; color: #fff; }
+
+    #mprProgressWrap {
+      background: #333; border-radius: 4px; height: 4px; margin-bottom: 12px;
+    }
+    #mprProgressBar {
+      height: 100%; width: 0%; background: #4fc3f7;
+      border-radius: 4px; transition: width 0.15s;
+    }
+
+    #mprGrid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .mprPane {
+      background: #111; border: 1px solid #444;
+      border-radius: 6px; padding: 8px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .mprPane .mprLabel {
+      font-size: 11px; font-weight: 700; color: #4fc3f7;
+      letter-spacing: 1px;
+    }
+    .mprPane canvas {
+      width: 100%; aspect-ratio: 1 / 1;
+      background: #000; display: block; cursor: crosshair;
+    }
+    .mprPane input[type=range] { width: 100%; }
+
+    /* Mode badge top-right */
+    #mprModeBadge {
+      font-size: 12px; font-weight: 700; padding: 3px 10px;
+      border-radius: 4px; letter-spacing: 1px;
+    }
+    #mprModeBadge.cpu { background: #1a3a5a; color: #4fc3f7; border: 1px solid #0078d4; }
+    #mprModeBadge.gpu { background: #1a4a2a; color: #81c784; border: 1px solid #4caf50; }
+  </style>
+</head>
+
+<body>
+
+  <!-- Shown while waiting for volume data from the opener tab -->
+  <div id="mprTabWaiting">
+    <p id="mprTabWaitMsg">Connecting to DICOM viewer…</p>
+    <div id="mprProgressWrapWait" style="width:300px;background:#333;border-radius:4px;height:4px;">
+      <div id="mprProgressBarWait" style="height:100%;width:0%;background:#4fc3f7;border-radius:4px;transition:width 0.15s;"></div>
+    </div>
+  </div>
+
+  <!-- MPR section (made visible by showMPRView) -->
+  <div id="mprSection">
+
+    <div id="mprTopBar">
+      <span id="mprModeBadge">MPR</span>
+      <div style="display:flex;gap:6px;">
+        <button onclick="applyMPRPreset(-600,1600)">Lung</button>
+        <button onclick="applyMPRPreset(400,1800)">Bone</button>
+        <button onclick="applyMPRPreset(40,400)">Soft Tissue</button>
+        <button onclick="applyMPRPreset(600,2800)">Brain</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span id="mprModeIndicator" style="font-size:12px;color:#aaa;">↕ Scroll mode &nbsp;(middle-click to switch)</span>
+        <button onclick="resetMPRZoom()">⊠ Reset Zoom</button>
+      </div>
+    </div>
+
+    <div id="mprProgressWrap">
+      <div id="mprProgressBar"></div>
+    </div>
+
+    <div id="mprGrid">
+      <div class="mprPane">
+        <div class="mprLabel" id="axialLabel">AXIAL</div>
+        <canvas id="axialCanvas"></canvas>
+        <input type="range" id="axialSlider" min="0" max="0" value="0">
+      </div>
+      <div class="mprPane">
+        <div class="mprLabel" id="coronalLabel">CORONAL</div>
+        <canvas id="coronalCanvas"></canvas>
+        <input type="range" id="coronalSlider" min="0" max="0" value="0">
+      </div>
+      <div class="mprPane">
+        <div class="mprLabel" id="sagittalLabel">SAGITTAL</div>
+        <canvas id="sagittalCanvas"></canvas>
+        <input type="range" id="sagittalSlider" min="0" max="0" value="0">
+      </div>
+    </div>
+
+  </div>
+
+  <script src="mpr.js"></script>
+  <script src="mpr-tab-init.js"></script>
+
+</body>
+</html>

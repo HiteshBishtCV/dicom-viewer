@@ -258,12 +258,15 @@ function loadSeries(series) {
   window._activeSeries   = series;
   window._activeImageIds = currentImageIds;
 
-  // Show MPR button only for volumetric image series (CT/MR with multiple slices)
-  const mprBtn = document.getElementById('mprBtn');
-  if ((series.modality === 'CT' || series.modality === 'MR') && total > 1) {
-    mprBtn.style.display = 'block';
-  } else {
-    mprBtn.style.display = 'none';
+  // Show MPR tab buttons for volumetric series (CT/MR, multi-slice).
+  // GPU button is hidden when WebGL is unavailable.
+  const mprGroup  = document.getElementById('mprBtnGroup');
+  const mprGpuBtn = document.getElementById('mprGpuBtn');
+  const isVolumetric = (series.modality === 'CT' || series.modality === 'MR') && total > 1;
+  mprGroup.style.display = isVolumetric ? 'flex' : 'none';
+  if (isVolumetric) {
+    const gpuAvail = typeof gpuVolume !== 'undefined' && gpuVolume.isWebGLAvailable();
+    mprGpuBtn.style.display = gpuAvail ? 'block' : 'none';
   }
 
   renderMetaPanel(series, total);
@@ -359,4 +362,32 @@ function applyPreset(wc, ww) {
 
 function updateSliceLabel(index, total) {
   sliceLabel.textContent = `Slice ${index + 1} / ${total}`;
+}
+
+// ── MPR tab launcher ──────────────────────────────────────────────────────────
+
+function openMPRTab(mode) {
+  const tab = window.open(`mpr-tab.html?mode=${mode}`, '_blank');
+  if (!tab) {
+    alert('Popup blocked — please allow popups for this page.');
+    return;
+  }
+
+  // Wait for the tab to signal it is ready, then send the volume data.
+  function onReady(e) {
+    if (e.source !== tab || !e.data || e.data.type !== 'mpr-ready') return;
+    window.removeEventListener('message', onReady);
+
+    const vp = cornerstone.getViewport(element);
+    const wc = vp ? Math.round(vp.voi.windowCenter) : 40;
+    const ww = vp ? Math.round(vp.voi.windowWidth)  : 400;
+
+    tab.postMessage({
+      type:     'mpr-data',
+      imageIds: window._activeImageIds,
+      series:   window._activeSeries,
+      wc, ww,
+    }, '*');
+  }
+  window.addEventListener('message', onReady);
 }

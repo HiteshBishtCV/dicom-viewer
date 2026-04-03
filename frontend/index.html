@@ -40,12 +40,17 @@
     }
     #presets button:hover { background: #3a3a3a; color: #fff; }
 
-    #mprBtn {
-      width: 512px; padding: 7px 0; background: #1a3a5a; color: #4fc3f7;
-      border: 1px solid #0078d4; border-radius: 4px; cursor: pointer;
-      font-size: 13px; font-weight: 600; display: none;
+    #mprBtnGroup {
+      display: none; width: 512px; gap: 6px;
     }
-    #mprBtn:hover { background: #1e4a72; }
+    #mprBtnGroup button {
+      flex: 1; padding: 7px 0; border-radius: 4px; cursor: pointer;
+      font-size: 13px; font-weight: 600; border: 1px solid #0078d4;
+    }
+    #mprCpuBtn { background: #1a3a5a; color: #4fc3f7; }
+    #mprCpuBtn:hover { background: #1e4a72; }
+    #mprGpuBtn { background: #1a4a2a; color: #81c784; }
+    #mprGpuBtn:hover { background: #225533; }
 
     /* ── Metadata panel ── */
     #metaPanel {
@@ -137,9 +142,10 @@
       <div id="modeIndicator" style="font-size:12px;color:#aaa;margin-top:2px;">
         ↕ Scroll mode &nbsp;(middle-click to switch)
       </div>
-      <button id="mprBtn" onclick="showMPRView(window._activeSeries, window._activeImageIds)">
-        ⊞ MPR View (Axial · Coronal · Sagittal)
-      </button>
+      <div id="mprBtnGroup">
+        <button id="mprCpuBtn" onclick="openMPRTab('cpu')">⊞ MPR — CPU</button>
+        <button id="mprGpuBtn" onclick="openMPRTab('gpu')">⊞ MPR — GPU</button>
+      </div>
     </div>
 
     <div id="metaPanel" style="display:none;">

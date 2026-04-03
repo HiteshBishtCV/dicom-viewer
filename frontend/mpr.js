@@ -76,13 +76,21 @@ function _doRender() {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-async function showMPRView(series, imageIds) {
+async function showMPRView(series, imageIds, wc, ww) {
   mprSeries = series;
 
-  const vp = cornerstone.getViewport(document.getElementById('dicomImage'));
-  if (vp) { mprWC = Math.round(vp.voi.windowCenter); mprWW = Math.round(vp.voi.windowWidth); }
+  // Read W/L from Cornerstone viewport when available (main viewer tab).
+  const dicomEl = document.getElementById('dicomImage');
+  if (dicomEl) {
+    const vp = cornerstone.getViewport(dicomEl);
+    if (vp) { mprWC = Math.round(vp.voi.windowCenter); mprWW = Math.round(vp.voi.windowWidth); }
+  }
+  // Caller-supplied values override (used by mpr-tab to pass the current W/L).
+  if (wc !== undefined) mprWC = wc;
+  if (ww !== undefined) mprWW = ww;
 
-  document.getElementById('viewerRow').style.display  = 'none';
+  const viewerRow = document.getElementById('viewerRow');
+  if (viewerRow) viewerRow.style.display = 'none';   // absent in the MPR tab
   document.getElementById('mprSection').style.display = 'block';
   setMPRProgress(0);
 
@@ -140,7 +148,8 @@ async function showMPRView(series, imageIds) {
 
 function exitMPR() {
   document.getElementById('mprSection').style.display = 'none';
-  document.getElementById('viewerRow').style.display  = 'flex';
+  const viewerRow = document.getElementById('viewerRow');
+  if (viewerRow) viewerRow.style.display = 'flex';
 }
 
 function applyMPRPreset(wc, ww) {
