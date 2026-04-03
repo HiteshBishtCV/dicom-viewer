@@ -268,6 +268,7 @@ function loadSeries(series) {
     const gpuAvail = typeof gpuVolume !== 'undefined' && gpuVolume.isWebGLAvailable();
     mprGpuBtn.style.display = gpuAvail ? 'block' : 'none';
     document.getElementById('volBtn').style.display = gpuAvail ? 'block' : 'none';
+    document.getElementById('drrBtn').style.display = gpuAvail ? 'block' : 'none';
   }
 
   renderMetaPanel(series, total);
@@ -381,6 +382,22 @@ function openVolTab() {
       series:   window._activeSeries,
       wc: vp ? Math.round(vp.voi.windowCenter) : 40,
       ww: vp ? Math.round(vp.voi.windowWidth)  : 400,
+    }, '*');
+  }
+  window.addEventListener('message', onReady);
+}
+
+function openDRRTab() {
+  const tab = window.open('drr-tab.html', '_blank');
+  if (!tab) { alert('Popup blocked — please allow popups for this page.'); return; }
+
+  function onReady(e) {
+    if (e.source !== tab || !e.data || e.data.type !== 'drr-ready') return;
+    window.removeEventListener('message', onReady);
+    tab.postMessage({
+      type:     'drr-data',
+      imageIds: window._activeImageIds,
+      series:   window._activeSeries,
     }, '*');
   }
   window.addEventListener('message', onReady);

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>DRR — DICOM</title>
+
+  <script src="https://unpkg.com/cornerstone-core/dist/cornerstone.js"></script>
+  <script src="https://unpkg.com/dicom-parser/dist/dicomParser.js"></script>
+  <script src="https://unpkg.com/cornerstone-wado-image-loader/dist/cornerstoneWADOImageLoader.bundle.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: sans-serif; background: #1a1a1a; color: #e0e0e0;
+      padding: 16px; display: flex; flex-direction: column; align-items: center;
+    }
+    h2 { margin-bottom: 4px; font-size: 15px; color: #aaa; letter-spacing: 1px; }
+    p.subtitle { font-size: 11px; color: #555; margin-bottom: 12px; }
+
+    /* ── Controls ── */
+    #controls {
+      display: flex; gap: 8px; align-items: center;
+      flex-wrap: wrap; justify-content: center; margin-bottom: 12px;
+    }
+    #controls button {
+      background: #2a2a2a; color: #ccc; border: 1px solid #444;
+      padding: 5px 12px; cursor: pointer; border-radius: 4px; font-size: 12px;
+    }
+    #controls button:hover  { background: #3a3a3a; color: #fff; }
+    #controls button.active { background: #005a9e; color: #fff; border-color: #0078d4; }
+    #controls .sep { color: #555; }
+
+    /* ── DRR canvas ── */
+    #drrCanvas {
+      width: min(90vw, 640px);
+      height: min(90vw, 640px);
+      background: #fff;
+      display: block;
+      cursor: grab;
+      border: 1px solid #333;
+      border-radius: 4px;
+    }
+    #drrCanvas:active { cursor: grabbing; }
+
+    /* ── Status & contrast ── */
+    #statusRow {
+      margin-top: 8px; display: flex; gap: 16px; align-items: center;
+      font-size: 11px; color: #666;
+    }
+    #statusRow label { display: flex; align-items: center; gap: 6px; color: #888; }
+    #statusRow input[type=range] { width: 120px; }
+
+    /* ── Loading overlay ── */
+    #loading {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 14px; padding-top: 80px;
+    }
+    #loading p  { color: #aaa; font-size: 14px; }
+    #progWrap   { width: 280px; height: 4px; background: #333; border-radius: 4px; }
+    #progBar    { height: 100%; width: 0%; background: #4fc3f7; border-radius: 4px; transition: width .15s; }
+  </style>
+</head>
+<body>
+
+  <!-- Loading -->
+  <div id="loading">
+    <p id="loadMsg">Connecting to DICOM viewer…</p>
+    <div id="progWrap"><div id="progBar"></div></div>
+  </div>
+
+  <!-- Viewer -->
+  <div id="viewer" style="display:none; flex-direction:column; align-items:center;">
+    <h2>DRR — DIGITALLY RECONSTRUCTED RADIOGRAPH</h2>
+    <p class="subtitle">Simulated X-ray from CT volume &nbsp;·&nbsp; Drag to rotate projection angle</p>
+
+    <div id="controls">
+      <button id="btnAP"  onclick="setView(0,   Math.PI/2)">AP</button>
+      <button id="btnLat" onclick="setView(Math.PI/2, Math.PI/2)">Lateral</button>
+      <button id="btnObl" onclick="setView(Math.PI/4, Math.PI/2)">Oblique</button>
+      <button id="btnSup" onclick="setView(0, 0.05)">Superior</button>
+      <span class="sep">|</span>
+      <button onclick="resetView()">Reset</button>
+    </div>
+
+    <canvas id="drrCanvas"></canvas>
+
+    <div id="statusRow">
+      <span id="status">Drag to rotate</span>
+      <label>
+        Contrast
+        <input type="range" id="scaleSlider" min="1" max="20" value="3" step="1"
+               oninput="onScaleChange(this.value)">
+        <span id="scaleVal">3</span>
+      </label>
+    </div>
+  </div>
+
+  <script src="drr-tab-init.js"></script>
+</body>
+</html>
