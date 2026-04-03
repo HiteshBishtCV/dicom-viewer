@@ -70,11 +70,23 @@
     in  vec2 v_uv;
     out vec4 fragColor;
     void main() {
+      // 1. Walk the 3-D texture along the plane defined by origin/dx/dy.
       vec3  coord = u_origin + v_uv.x * u_dx + v_uv.y * u_dy;
-      float norm  = texture(u_volume, coord).r;
-      float hu    = norm * (u_max - u_min) + u_min;
-      float val   = clamp((hu - (u_wc - u_ww * 0.5)) / u_ww, 0.0, 1.0);
-      fragColor   = vec4(val, val, val, 1.0);
+
+      // 2. Sample and undo the [0,1] normalisation stored at upload time
+      //    to recover the original Hounsfield Unit value.
+      //      norm ∈ [0,1]  →  hu = norm × (max−min) + min
+      float norm = texture(u_volume, coord).r;
+      float hu   = norm * (u_max - u_min) + u_min;
+
+      // 3. Window/Level mapping (standard radiological definition):
+      //      low = wc − ww/2          (lower bound of visible range)
+      //      val = (hu − low) / ww    (linear ramp across the window)
+      //    clamp forces: below window → 0.0 (black), above → 1.0 (white).
+      float val = clamp((hu - (u_wc - u_ww * 0.5)) / u_ww, 0.0, 1.0);
+
+      // 4. Output grayscale (R=G=B=val, fully opaque).
+      fragColor = vec4(val, val, val, 1.0);
     }
   `;
 

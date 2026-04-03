@@ -10,6 +10,13 @@ let mprWW     = 400;
 let _gpuHandle   = null;   // GpuVolumeHandle from gpu-volume.js
 let _gpuRenderer = null;   // SliceRenderer   from gpu-slice.js
 
+function _setCPUCanvasVisibility(visible) {
+  ['axialCanvas', 'coronalCanvas', 'sagittalCanvas'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = visible ? '' : 'none';
+  });
+}
+
 // ── Shared indices ────────────────────────────────────────────────────────────
 let xIndex = 0;   // sagittal plane position  (0 … cols-1)
 let yIndex = 0;   // coronal  plane position  (0 … rows-1)
@@ -94,6 +101,10 @@ async function showMPRView(series, imageIds, wc, ww) {
   document.getElementById('mprSection').style.display = 'block';
   setMPRProgress(0);
 
+  // Ensure CPU canvases are visible at the start of every session.
+  // They will be hidden below if the GPU renderer initialises successfully.
+  _setCPUCanvasVisibility(true);
+
   mprVolume = await buildVolume(imageIds, setMPRProgress);
 
   // ── GPU texture upload ────────────────────────────────────────────────────
@@ -105,6 +116,10 @@ async function showMPRView(series, imageIds, wc, ww) {
     _gpuHandle   = gpuVolume.uploadVolumeToGPU(mprVolume);   // null on no-GPU machines
     _gpuRenderer = gpuSlice.init(_gpuHandle);                // null if upload failed
   }
+
+  // When GPU is active it owns all W/L computation; hide the CPU canvases so
+  // the panes show only the GPU output (no stale/duplicate views).
+  if (_gpuRenderer) _setCPUCanvasVisibility(false);
 
   xIndex = Math.floor(mprVolume.cols   / 2);
   yIndex = Math.floor(mprVolume.rows   / 2);
@@ -241,26 +256,30 @@ async function buildVolume(imageIds, onProgress) {
 // ── Reslicing ─────────────────────────────────────────────────────────────────
 
 function renderAxial(z) {
-  const v     = mprVolume;
-  const size  = v.rows * v.cols;
-  const slice = v.buffer.subarray(z * size, (z + 1) * size);
-  const crosshair = {
-    x: xIndex / Math.max(1, v.cols - 1),
-    y: yIndex / Math.max(1, v.rows - 1),
-  };
-  renderToCanvas(slice, v.cols, v.rows, 'axialCanvas',
-    { left: 'R', right: 'L' },
-    crosshair,
-    v.cols * v.colSpacing, v.rows * v.rowSpacing);
+  const v = mprVolume;
   document.getElementById('axialLabel').textContent = `AXIAL  —  z ${z + 1} / ${v.slices}`;
 
-  // GPU path — runs alongside CPU, no-op if WebGL unavailable
-  if (_gpuRenderer) _gpuRenderer.renderAxial(z, mprWC, mprWW);
+  // GPU path: W/L is applied entirely in the fragment shader via uniforms.
+  // Early-return skips the CPU pixel loop below — no JS W/L computation.
+  if (_gpuRenderer) { _gpuRenderer.renderAxial(z, mprWC, mprWW); return; }
+
+  // CPU fallback (only reached when GPU is unavailable).
+  const size  = v.rows * v.cols;
+  const slice = v.buffer.subarray(z * size, (z + 1) * size);
+  renderToCanvas(slice, v.cols, v.rows, 'axialCanvas',
+    { left: 'R', right: 'L' },
+    { x: xIndex / Math.max(1, v.cols - 1), y: yIndex / Math.max(1, v.rows - 1) },
+    v.cols * v.colSpacing, v.rows * v.rowSpacing);
 }
 
 function renderCoronal(y) {
-  const v    = mprVolume;
-  const data = v._coronalBuf;   // reuse pre-allocated buffer — no GC pressure
+  const v = mprVolume;
+  document.getElementById('coronalLabel').textContent = `CORONAL  —  y ${y + 1} / ${v.rows}`;
+
+  if (_gpuRenderer) { _gpuRenderer.renderCoronal(y, mprWC, mprWW); return; }
+
+  // CPU fallback.
+  const data = v._coronalBuf;
   for (let s = 0; s < v.slices; s++) {
     const srcRow = s * v.rows * v.cols + y * v.cols;
     const dstRow = s * v.cols;
@@ -268,41 +287,32 @@ function renderCoronal(y) {
       data[dstRow + (v.cols - 1 - c)] = v.buffer[srcRow + c];   // horizontal flip → L on left
     }
   }
-  const crosshair = {
-    x: (v.cols - 1 - xIndex) / Math.max(1, v.cols - 1),
-    y: zIndex / Math.max(1, v.slices - 1),
-  };
   renderToCanvas(data, v.cols, v.slices, 'coronalCanvas',
     { left: 'L', right: 'R', top: 'S', bottom: 'I' },
-    crosshair,
+    { x: (v.cols - 1 - xIndex) / Math.max(1, v.cols - 1), y: zIndex / Math.max(1, v.slices - 1) },
     v.cols   * v.colSpacing,
     v.slices * v.sliceThickness);
-  document.getElementById('coronalLabel').textContent = `CORONAL  —  y ${y + 1} / ${v.rows}`;
-
-  if (_gpuRenderer) _gpuRenderer.renderCoronal(y, mprWC, mprWW);
 }
 
 function renderSagittal(x) {
-  const v    = mprVolume;
-  const data = v._sagittalBuf;  // reuse pre-allocated buffer — no GC pressure
+  const v = mprVolume;
+  document.getElementById('sagittalLabel').textContent = `SAGITTAL  —  x ${x + 1} / ${v.cols}`;
+
+  if (_gpuRenderer) { _gpuRenderer.renderSagittal(x, mprWC, mprWW); return; }
+
+  // CPU fallback.
+  const data = v._sagittalBuf;
   for (let s = 0; s < v.slices; s++) {
     const dstRow = s * v.rows;
     for (let r = 0; r < v.rows; r++) {
       data[dstRow + (v.rows - 1 - r)] = v.buffer[s * v.rows * v.cols + r * v.cols + x];  // horizontal flip → A on right
     }
   }
-  const crosshair = {
-    x: (v.rows - 1 - yIndex) / Math.max(1, v.rows - 1),
-    y: zIndex / Math.max(1, v.slices - 1),
-  };
   renderToCanvas(data, v.rows, v.slices, 'sagittalCanvas',
     { left: 'P', right: 'A', top: 'S', bottom: 'I' },
-    crosshair,
+    { x: (v.rows - 1 - yIndex) / Math.max(1, v.rows - 1), y: zIndex / Math.max(1, v.slices - 1) },
     v.rows   * v.rowSpacing,
     v.slices * v.sliceThickness);
-  document.getElementById('sagittalLabel').textContent = `SAGITTAL  —  x ${x + 1} / ${v.cols}`;
-
-  if (_gpuRenderer) _gpuRenderer.renderSagittal(x, mprWC, mprWW);
 }
 
 // ── Canvas renderer ───────────────────────────────────────────────────────────
