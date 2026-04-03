@@ -4,13 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A DICOM medical image viewer with a Python backend and vanilla JS frontend. Users upload DICOM folders, the backend parses and groups files by series, and the frontend renders slices using Cornerstone.js.
+A DICOM medical image viewer with a Python backend and vanilla JS frontend. Users upload DICOM folders; the backend parses and groups files by series; the frontend renders slices using Cornerstone.js and supports GPU-accelerated MPR, 3D volume rendering, and DRR.
 
 ## Architecture
 
-- **Backend** (`backend/server.py`): FastAPI server using pydicom. Single `/upload/` endpoint accepts DICOM files, filters out scouts/localizers, groups by SeriesInstanceUID, sorts by InstanceNumber, and returns series metadata. Uploaded files are saved to `backend/uploaded_dicoms/`.
-- **Frontend** (`frontend/`): Static HTML/JS app (no build step). Uses Cornerstone.js (via CDN) for DICOM rendering with WADO image loader and dicom-parser. `app.js` handles file upload, series selection buttons, and slice navigation via a range slider.
-- Frontend fetches from `http://127.0.0.1:8000` and loads images via `wadouri:` scheme pointing at the backend.
+### Backend (`backend/server.py`)
+FastAPI server using pydicom. Single `/upload/` endpoint accepts DICOM files, filters scouts/localizers, groups by `SeriesInstanceUID`, sorts by `InstanceNumber`, rewrites files missing DICOM meta headers, and returns series metadata. Uploaded files are saved to `backend/uploaded_dicoms/`. A `/files/` static mount serves files to the WADO loader.
+
+### Frontend (`frontend/`)
+Static HTML/JS app — no build step. All scripts loaded via `<script>` tags or dynamically.
+
+| File | Role |
+|------|------|
+| `index.html` | Layout, styles, CDN script tags for Cornerstone |
+| `app.js` | 2D viewer: upload, series list, W/L drag, scroll/zoom, preset buttons, tab launchers |
+| `mpr.js` | CPU MPR: volume builder, reslice renderers, crosshair, performance layer |
+| `gpu-volume.js` | WebGL2 volume upload: 3D texture (R16F half-float) or WebGL1 fallback |
+| `gpu-slice.js` | GPU MPR slicer: single parameterised shader for axial/coronal/sagittal |
+| `mpr-tab.html` + `mpr-tab-init.js` | Standalone MPR tab (CPU or GPU mode) |
+| `volume-render.js` | GPU ray-cast renderer: MIP + transfer-function compositing |
+| `vol-tab.html` + `vol-tab-init.js` | Standalone 3D volume tab |
+| `drr-render.js` | GPU DRR renderer: orthographic Beer-Lambert ray-sum |
+| `drr-tab.html` + `drr-tab-init.js` | Standalone DRR tab |
+
+Frontend fetches from `http://127.0.0.1:8000` and loads images via the `wadouri:` scheme.
 
 ## Commands
 
@@ -22,7 +39,7 @@ uvicorn server:app --reload
 ```
 
 ### Run frontend
-Open `frontend/index.html` directly in a browser (no build/server needed), or use any static file server.
+Open `frontend/index.html` directly in a browser (no build/server needed).
 
 ### Install backend dependencies
 ```bash
@@ -34,8 +51,20 @@ pip install fastapi uvicorn pydicom python-multipart
 
 ## Key Details
 
-- Python 3.12, no requirements.txt yet — dependencies are fastapi, uvicorn, pydicom, python-multipart
-- No test framework is set up
+- Python 3.12, no requirements.txt — dependencies: fastapi, uvicorn, pydicom, python-multipart
+- No test framework configured
 - No linter or formatter configured
-- CORS is wide open (`allow_origins=["*"]`) — development only
-- The frontend references a `/files/` endpoint for serving DICOM images that is not yet implemented in the backend
+- CORS wide open (`allow_origins=["*"]`) — development only
+- GPU features require WebGL2 (Chrome/Firefox modern). Buttons are hidden when unavailable.
+- Tabs communicate with the main window via `postMessage` (handshake: `*-ready` / `*-data`)
+- All GPU renderers share one WebGL context from `gpu-volume.js` (`preserveDrawingBuffer: true`)
+- Volume texture format: `R16F` + `FLOAT` (WebGL2) for ~1024 distinct HU levels; `LUMINANCE` + `UNSIGNED_BYTE` (WebGL1 fallback)
+- Slices sorted descending by `ImagePositionPatient` z before volume build (superior-first)
+
+## GPU Rendering Notes
+
+- `gpu-volume.js` must be loaded before `gpu-slice.js`, `volume-render.js`, or `drr-render.js`
+- All three GPU renderers render to the hidden `glCanvas` inside `gpuHandle`, then `drawImage` copy to the visible output canvas
+- W/L math in shaders: `val = clamp((hu - (wc - ww/2)) / ww, 0, 1)`
+- DRR attenuation proxy: `μ = max(0, HU + 1000)` per voxel, summed along ray, then `exp(-sum * scale)` inverted
+- Transfer function texture: 256×1 RGBA8, x-coord = normalised volume sample [0,1], authored against typical CT range [-1000, +3000] HU

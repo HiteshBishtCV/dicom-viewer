@@ -1,13 +1,13 @@
 # DICOM Viewer
 
-A web-based DICOM viewer built with a Python/FastAPI backend and vanilla JS + Cornerstone.js frontend. Supports CT, MRI, RT structures, and full MPR reconstruction — no build step required.
+A web-based DICOM viewer with a Python/FastAPI backend and vanilla JS + Cornerstone.js frontend. Supports CT, MRI, RT structures, full MPR reconstruction, GPU-accelerated rendering, 3D volume ray casting, and DRR simulation — no build step required.
 
 ## Stack
 
 | Layer | Technology |
 |-------|-----------|
 | Backend | Python 3.12, FastAPI, pydicom |
-| Frontend | Vanilla JS, Cornerstone.js v2 (CDN), cornerstone-tools, cornerstone-wado-image-loader |
+| Frontend | Vanilla JS, Cornerstone.js (CDN), WebGL2 |
 
 ## Setup
 
@@ -42,7 +42,7 @@ firefox frontend/index.html
 | CT / MR / RTIMAGE | Image viewer with slice scrolling |
 | RTPLAN | Beam table (name, type, energy) |
 | RTSTRUCT | ROI list with numbers and names |
-| RTDOSE | Skipped (metadata only) |
+| RTDOSE | Multi-frame image viewer |
 | REG | Registration entry count |
 
 ---
@@ -51,31 +51,35 @@ firefox frontend/index.html
 
 - Upload an entire DICOM folder — files are grouped by `SeriesInstanceUID`
 - Scouts / localizers filtered out automatically
-- Files missing DICOM File Meta headers are rewritten with a proper header on upload so the browser can parse them
+- Files missing DICOM File Meta headers are rewritten with a proper header on upload
 - **Mouse wheel** — scroll through slices (default mode)
 - **Middle-mouse click** — toggle between Scroll mode and Zoom mode; wheel zooms viewport in Zoom mode
-- **Left-click drag** — adjust Window/Level: left/right changes Window Width (contrast), up/down changes Window Center (brightness); sensitivity 2 HU/px, values clamped to safe ranges
+- **Left-click drag** — adjust Window/Level: left/right → Window Width (contrast), up/down → Window Center (brightness); sensitivity 2 HU/px, values clamped to safe ranges
 - **Slider** — scrub through slices; shows current slice / total
 - **Window presets** — Lung (WL −600 / WW 1600), Bone (WL 400 / WW 1800), Soft Tissue (WL 40 / WW 400), Brain (WL 600 / WW 2800)
-- **Metadata panel** — shows modality, series description, slice count, image dimensions, pixel spacing, slice thickness, live WL / WW
+- **Metadata panel** — modality, series description, slice count, image dimensions, pixel spacing, slice thickness, live WL / WW
 
 ---
 
 ### MPR View (Multi-Planar Reconstruction)
 
-Available for CT and MR series with more than one slice. Click **⊞ MPR View** to enter.
+Available for CT and MR series with more than one slice. Opens in a new browser tab in either **CPU** or **GPU** mode.
 
-#### How MPR works
+#### CPU mode
 
-All slices are loaded and assembled into a single `Float32Array` volume in memory. The three orthogonal planes are then computed by reading different slices through that buffer:
+All slices are assembled into a single `Float32Array` volume in memory. The three orthogonal planes are computed by reading different slices through that buffer:
 
-- **Axial** — reads a horizontal slab directly from the buffer (zero-copy `subarray`)
-- **Coronal** — reads one row across all slices, writing columns in reverse to follow radiological convention (L on left)
-- **Sagittal** — reads one column across all slices, writing rows in reverse (A on right)
+- **Axial** — zero-copy `subarray` of the buffer
+- **Coronal** — one row across all slices, columns reversed for radiological convention (L on left)
+- **Sagittal** — one column across all slices, rows reversed (A on right)
 
-HU scaling (`pixel × slope + intercept`) is applied once during volume build, so rendering is just a windowing lookup with no per-frame DICOM math.
+HU scaling (`pixel × slope + intercept`) is applied once at build time.
 
-#### Navigation
+#### GPU mode
+
+The volume is uploaded to a WebGL2 `TEXTURE_3D` (R16F half-float format). A single parameterised GLSL shader handles all three planes via `u_origin`, `u_dx`, `u_dy` uniforms. W/L is applied entirely in the fragment shader. Output is rendered to a hidden GL canvas then copied via `drawImage` to the visible output canvas.
+
+#### Navigation (both modes)
 
 | Input | Action |
 |-------|--------|
@@ -86,85 +90,100 @@ HU scaling (`pixel × slope + intercept`) is applied once during volume build, s
 | Arrow Left / Right | Move sagittal plane (x) |
 | W / S | Move coronal plane (y) |
 | Click on any view | Jump crosshair to that point, syncing all three views |
+| Reset Zoom button | Restore all canvas scales to 1× |
 
 #### Crosshair overlay
 
-Each view draws two dashed cyan lines showing the current intersection point. The crosshair position is computed from the shared `xIndex / yIndex / zIndex` state and drawn after every render. Clicking anywhere inside a view moves the intersection to that point and immediately updates the other two views.
+Each view draws two dashed cyan lines showing the current intersection point. Clicking anywhere in a view moves the intersection and immediately updates the other two views.
 
-#### Orientation correction
+#### Orientation & aspect ratio
 
-When building the volume, each slice's `ImagePositionPatient` tag (DICOM `0020,0032`) is read and slices are sorted descending by z-coordinate. This places the most superior slice at index 0 regardless of whether the scanner acquired head-first or feet-first, making the S/I labels on coronal and sagittal views unconditionally correct.
-
-#### Aspect ratio correction
-
-Raw pixel counts are not used for scaling. Instead, each view is scaled using physical millimetre dimensions:
+Slices are sorted by `ImagePositionPatient` z descending (superior-first) before volume build. Canvas scaling uses physical millimetre dimensions rather than raw pixel counts, so thick-slice coronal and sagittal views are never squashed.
 
 | View | Physical width | Physical height |
-|------|---------------|----------------|
+|------|----------------|----------------|
 | Axial | `cols × colSpacing` mm | `rows × rowSpacing` mm |
 | Coronal | `cols × colSpacing` mm | `slices × sliceThickness` mm |
 | Sagittal | `rows × rowSpacing` mm | `slices × sliceThickness` mm |
 
-This matters because slice thickness (e.g. 3 mm) is usually much larger than pixel spacing (e.g. 0.977 mm). Without this correction, coronal and sagittal views appear squashed vertically.
+---
 
-#### Window presets
+### 3D Volume Rendering (GPU)
 
-All four presets (Lung, Bone, Soft Tissue, Brain) apply to all three MPR views simultaneously.
+Opens in a new browser tab. Requires WebGL2.
+
+- **MIP (Maximum Intensity Projection)** — shows the brightest windowed voxel along each ray, ideal for CT bone and vessel detail
+- **Transfer functions** — map intensity to colour + opacity using front-to-back Porter-Duff alpha compositing with early-exit at 99% opacity
+
+| Preset | Appearance |
+|--------|-----------|
+| Bone | Ivory cortical bone (opaque) + faint pink soft tissue |
+| Soft Tissue | Yellow fat + pink muscle/organs + barely-visible bone |
+| Lung | Cyan parenchyma + red vessels/bronchi + ivory ribs |
+| MIP | Greyscale maximum intensity projection |
+
+- **Mouse drag** — rotate camera (spherical theta/phi coordinates, gimbal-lock-free)
+- **Reset Camera** button restores default viewing angle
+
+#### Shader architecture
+
+256-step ray march through the `TEXTURE_3D` volume. In MIP mode the shader keeps the maximum windowed value. In TF mode each step samples a 256×1 RGBA8 transfer function texture (x-coord = raw normalised voxel value) and composites front-to-back. A single `u_mip` float switches between modes; `setPreset()` uploads a new TF texture without recompiling the shader.
+
+---
+
+### DRR (Digitally Reconstructed Radiograph)
+
+Opens in a new browser tab. Requires WebGL2.
+
+A DRR simulates a plain X-ray image by integrating CT attenuation values along parallel rays through the volume, following the Beer-Lambert law.
+
+#### Physics model
+
+Real X-rays obey `I = I₀ · exp(−∫μ dx)` where `μ` (linear attenuation coefficient) is proportional to electron density and therefore to HU:
+
+| Tissue | HU | μ proxy |
+|--------|----|---------|
+| Air | −1000 | 0 — fully transparent |
+| Soft tissue | ~0–80 | ~1000–1080 — moderate attenuation |
+| Bone | ~400–700 | ~1400–1700 — strong attenuation → dark on film |
+
+The shader accumulates `max(0, HU + 1000) × stepSize` along each ray then applies `exp(−sum × scale)`, inverting so dense structures appear dark.
+
+#### Controls
+
+| Control | Action |
+|---------|--------|
+| AP / Lateral / Oblique / Superior buttons | Standard radiograph projections |
+| Mouse drag | Freely rotate the projection direction |
+| Contrast slider (1–20) | Adjusts attenuation scale (×0.001 – ×0.020) |
+
+All rays are orthographic (parallel) — no focal-spot geometry, which is standard for DRR use in radiation therapy planning.
 
 ---
 
 ### HU Scaling
 
-`RescaleSlope` and `RescaleIntercept` are read from DICOM metadata by the WADO loader and applied automatically. The default viewport is initialised once per series using `getDefaultViewportForImage`, then preserved while scrolling so W/L adjustments are not reset between slices.
+`RescaleSlope` and `RescaleIntercept` are read from DICOM metadata by the WADO loader and applied automatically. The default viewport is initialised once per series using `getDefaultViewportForImage`, then preserved while scrolling so W/L adjustments survive slice changes.
 
 ---
 
 ## Performance
 
-The MPR pipeline is optimised so that navigating through a loaded volume is as fast as possible and memory stays flat during use.
+### Image cache
 
-### Action 1 — Image cache
+A `Map` (`_imageCache`) keyed by imageId stores every decoded Cornerstone image object after first load. Subsequent MPR opens for the same series require zero network requests or decode work.
 
-**Problem:** `cornerstone.loadImage()` fetches and decodes each DICOM file from the server. Re-entering MPR (or switching back and forth) would repeat that work.
+### Volume cache
 
-**Solution:** A `Map` (`_imageCache`) keyed by imageId stores every decoded Cornerstone image object after its first load. On subsequent calls `_loadImage()` returns the cached object synchronously — no network request, no DICOM decode.
+The built `Float32Array` volume is stored in `_volumeCache` keyed by `firstImageId + sliceCount`. Re-entering MPR for the same series returns the cached volume instantly — the progress bar jumps to 100% in under 1 ms.
 
-**Effect:** Second and subsequent MPR opens for the same series are limited only by the volume assembly loop, not by network latency or decode time. Verify in DevTools → Network: zero requests on re-entry.
+### requestAnimationFrame render gate
 
-### Action 2 — Volume cache
+`updateAllViews()` schedules rendering via `requestAnimationFrame` behind a flag, collapsing any number of input events (key-repeat, wheel, slider drag) into exactly one render per display frame.
 
-**Problem:** Assembling the `Float32Array` volume requires iterating over every pixel of every slice to apply HU scaling — for a 512×512×125 CT that is 32 million multiply-add operations. Re-entering MPR repeated this every time.
+### Pre-allocated reslice buffers
 
-**Solution:** The built volume is stored in `_volumeCache` and keyed by `firstImageId + sliceCount`. `buildVolume()` checks the key first; if it matches, it returns the cached volume immediately (calling `onProgress(100)` so the progress bar completes instantly).
-
-**Effect:** Re-entering MPR for the same series is instantaneous. The progress bar jumps to 100% without animating. Verify in DevTools → Console by timing `buildVolume` calls.
-
-### Action 3 — requestAnimationFrame render gate
-
-**Problem:** Input events (key-repeat, mouse wheel, slider drag) fire many times per frame. Each event was calling `updateAllViews()` directly, which ran three full canvas renders synchronously — often 5–10 renders per frame instead of one.
-
-**Solution:** `updateAllViews()` sets a boolean flag `_rafPending` and schedules `_doRender()` via `requestAnimationFrame`. Any further calls while the flag is set are no-ops. The flag clears when the browser actually paints, then the cycle can repeat.
-
-**Effect:** Exactly one render per display frame regardless of how many events fire. Frame time stays near 16 ms at 60 Hz even during rapid keyboard navigation. Verify in DevTools → Performance: record while holding an arrow key and look for consistent frame spacing with no "Long Task" bars.
-
-### Action 4 — Pre-allocated reslice buffers
-
-**Problem:** `renderCoronal()` and `renderSagittal()` called `new Float32Array(...)` on every frame. For a 512×125 volume each array is 256 KB. Allocating and immediately discarding two 256 KB arrays per navigation event creates constant GC pressure, causing periodic frame-time spikes.
-
-**Solution:** Two fixed-size typed arrays (`_coronalBuf` and `_sagittalBuf`) are allocated once inside `buildVolume()` and stored on the volume object. The render functions write into these buffers in-place using indexed assignment — zero heap allocations during navigation.
-
-**Effect:** JS heap size stays flat during MPR navigation (no sawtooth GC pattern). Verify in DevTools → Memory → Allocation instrumentation on timeline: no `Float32Array` allocation bars appear while navigating, only the initial volume allocation at load time.
-
-### Verifying all four together
-
-Open **Performance Monitor** (DevTools → three-dot menu → More tools → Performance monitor) while using MPR and watch:
-
-| Metric | Before optimisation | After optimisation |
-|--------|--------------------|--------------------|
-| JS heap size during navigation | Sawtooth (GC every few frames) | Flat line |
-| Network requests on MPR reopen | 100+ DICOM fetches | Zero |
-| Volume build time on reopen | Several seconds | < 1 ms |
-| Renders per keypress burst | 5–10 | 1 |
+`_coronalBuf` and `_sagittalBuf` are allocated once inside `buildVolume()` and reused every frame. No heap allocations occur during MPR navigation — JS heap stays flat with no GC pressure.
 
 ---
 
@@ -173,90 +192,56 @@ Open **Performance Monitor** (DevTools → three-dot menu → More tools → Per
 ```
 dicom-viewer/
 ├── backend/
-│   └── server.py          # FastAPI: upload, header-fix, series grouping
+│   └── server.py              # FastAPI: upload, header-fix, series grouping, static files
 ├── frontend/
-│   ├── index.html         # Layout, styles, CDN script tags
-│   ├── app.js             # 2D viewer logic (upload, series list, W/L, scroll/zoom)
-│   └── mpr.js             # MPR volume builder, reslicing renderer, performance layer
-└── Patient_data/          # Sample patient data (not committed)
+│   ├── index.html             # Layout, styles, CDN script tags
+│   ├── app.js                 # 2D viewer logic + tab launchers
+│   ├── mpr.js                 # CPU MPR: volume builder, reslicing, crosshair, caches
+│   ├── gpu-volume.js          # WebGL2 volume upload (R16F TEXTURE_3D)
+│   ├── gpu-slice.js           # GPU MPR slicer (parameterised shader, all 3 planes)
+│   ├── mpr-tab.html           # Standalone MPR tab layout
+│   ├── mpr-tab-init.js        # MPR tab bootstrap (CPU or GPU mode)
+│   ├── volume-render.js       # GPU ray-cast renderer (MIP + TF compositing)
+│   ├── vol-tab.html           # Standalone 3D volume tab layout
+│   ├── vol-tab-init.js        # 3D volume tab bootstrap
+│   ├── drr-render.js          # GPU DRR renderer (Beer-Lambert ray-sum)
+│   ├── drr-tab.html           # Standalone DRR tab layout
+│   └── drr-tab-init.js        # DRR tab bootstrap
+└── Patient_data/              # Sample patient data (not committed)
 ```
 
 ---
 
 ## Changelog
 
-### [c5141ac] Performance Action 4: pre-allocated reslice buffers
-- `_coronalBuf` and `_sagittalBuf` allocated once in `buildVolume`, reused every frame
-- Eliminates two 256 KB `Float32Array` allocations per navigation event
-- JS heap stays flat; GC pauses eliminated during MPR use
+### DRR renderer
+- `drr-render.js`: WebGL2 orthographic parallel-ray Beer-Lambert integration
+- Attenuation proxy `μ = max(0, HU+1000)`; Beer-Lambert inversion `exp(−sum·scale)`
+- AP, Lateral, Oblique, Superior preset views; drag-to-rotate; contrast slider
 
-### [6f61068] Performance Actions 1–3: image cache, volume cache, rAF gate
-- `_imageCache` Map keeps decoded Cornerstone images alive across sessions
-- `_volumeCache` returns the assembled volume instantly on re-entry
-- `requestAnimationFrame` gate collapses burst events into one paint per frame
+### Transfer function volume rendering
+- `volume-render.js`: MIP mode + front-to-back TF compositing in same shader (`u_mip` toggle)
+- 1D TF texture (256×1 RGBA8) uploaded via `setPreset()` — no shader recompile on switch
+- Presets: Bone (ivory), Soft Tissue (pink organs), Lung (cyan parenchyma + red vessels)
 
-### [09ca1ce] MPR zoom toggle
-- Middle-mouse click toggles Scroll / Zoom mode on MPR canvases (mirrors 2D viewer)
-- Per-canvas zoom scale stored in `mprCanvasZoom`; zoom applied after aspect-ratio correction
-- Mode indicator and Reset Zoom button added to MPR top bar
+### GPU MPR + 3D tab system
+- `gpu-volume.js`: R16F `TEXTURE_3D` upload; WebGL1 fallback (LUMINANCE atlas)
+- `gpu-slice.js`: single parameterised shader for all three MPR planes; W/L in shader
+- `volume-render.js`: perspective ray-cast MIP with spherical camera and rAF gate
+- New tabs: MPR (CPU/GPU choice), 3D Volume, DRR — all using postMessage handshake
 
-### [ca29b27] MPR features: crosshair, click navigation, orientation & aspect ratio
-- Cyan dashed crosshair drawn on all three views after every render
-- Click anywhere in a view to move the intersection point and sync all views
-- `buildVolume` sorts slices by `ImagePositionPatient` z descending — S/I labels always correct
-- Physical mm dimensions used for canvas scaling — thick-slice views no longer squashed
+### Performance optimisations (MPR)
+- Image cache: zero re-fetches on MPR reopen
+- Volume cache: sub-millisecond volume rebuild on reopen
+- rAF gate: one render per display frame regardless of input burst rate
+- Pre-allocated reslice buffers: flat JS heap during navigation
 
-### [9ee7b30] Fix MPR wheel scroll — arrow functions have no arguments object
-- `arguments[0]` in arrow function callbacks was always `undefined`, making index `NaN`
-- Fixed by using an explicit parameter `(d)` in wheel callbacks
+### MPR view (CPU)
+- Three-panel reconstruction: axial, coronal, sagittal
+- Shared `xIndex / yIndex / zIndex` state with crosshair overlay and click navigation
+- Physical mm scaling for correct aspect ratios on thick-slice volumes
+- `ImagePositionPatient` z-sort for correct superior/inferior orientation
 
-### [31b5701] MPR centralized rendering engine with shared indices
-- `updateAllViews()` as single entry point: clamps indices, syncs sliders, renders all three planes
-- Shared `xIndex / yIndex / zIndex` as the authoritative 3-D intersection point
-- All inputs (slider, wheel, keyboard) write to indices and call `updateAllViews()`
-
-### [d5098cd] MPR view — axial, coronal, sagittal reconstruction
-- `mpr.js`: loads all slices into a `Float32Array` volume, reslices on demand
-- Three-panel grid with independent sliders and mouse-wheel scroll per view
-- Progress bar during volume loading; W/L presets apply to all three views
-- Horizontal flip on coronal/sagittal for radiological orientation (L on left)
-- Orientation labels: R/L on axial; L/R/S/I on coronal; P/A/S/I on sagittal
-
-### [1c42108] Middle-mouse scroll/zoom toggle (2D viewer)
-- Middle-mouse button toggles wheel between Scroll and Zoom modes
-- Zoom mode: scroll up = ×1.1, scroll down = ×0.9, scale clamped to [0.1, 10]
-
-### [e8ad972] W/L presets, live display, clamping, smoother drag
-- Window presets: Lung, Bone, Soft Tissue, Brain
-- Live WL / WW display updates on every drag move and preset click
-- WW clamped to [1, 10000], WC clamped to [−2000, 5000]
-- Drag sensitivity 2 HU/px
-
-### [41bdbbd] Window/Level drag, proper viewport init, HU scaling
-- Left-click drag: left/right → Window Width, up/down → Window Center
-- `getDefaultViewportForImage` called once per series; viewport preserved across slices
-
-### [dee05bc] Mouse wheel scroll fix
-- Replaced unreliable `StackScrollMouseWheelTool` with a native `wheel` event listener
-
-### [e195390] Metadata sidebar + slice counter
-- Backend returns pixel spacing, slice thickness, window C/W, image dimensions per series
-- Metadata panel displayed beside the viewer
-
-### [cf52311] Fix CT/MR rendering — missing DICOM meta headers
-- Files without DICOM preamble fail silently in `dicom-parser`
-- Backend rewrites such files as Explicit VR Little Endian before serving
-
-### [a6b32a1] RTSTRUCT and REG support
-- RTSTRUCT: ROI list as a numbered table
-- REG: registration entry count displayed
-
-### [2d4c7e2] RTPLAN, RTDOSE, RTIMAGE modalities
-- RTPLAN: beam table with name, type, energy
-- RTDOSE: multi-frame DICOM via `wadouri:url?frame=N`
-- RTIMAGE: treated as standard image series
-
-### [ad0fa3b] Initial commit
-- FastAPI backend: upload endpoint, series grouping by `SeriesInstanceUID`, scout filtering
-- Static file serving via `StaticFiles` mount for WADO image loading
-- Cornerstone.js frontend: file upload, series buttons, slice slider
+### 2D viewer
+- W/L drag, scroll/zoom toggle, window presets, metadata panel
+- Middle-mouse scroll/zoom toggle, per-slice label, DICOM header rewrite
