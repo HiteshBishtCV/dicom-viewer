@@ -6,6 +6,10 @@ let mprSeries = null;
 let mprWC     = 40;
 let mprWW     = 400;
 
+// ── GPU slice renderer ────────────────────────────────────────────────────────
+let _gpuHandle   = null;   // GpuVolumeHandle from gpu-volume.js
+let _gpuRenderer = null;   // SliceRenderer   from gpu-slice.js
+
 // ── Shared indices ────────────────────────────────────────────────────────────
 let xIndex = 0;   // sagittal plane position  (0 … cols-1)
 let yIndex = 0;   // coronal  plane position  (0 … rows-1)
@@ -83,6 +87,16 @@ async function showMPRView(series, imageIds) {
   setMPRProgress(0);
 
   mprVolume = await buildVolume(imageIds, setMPRProgress);
+
+  // ── GPU texture upload ────────────────────────────────────────────────────
+  // Tear down any previous renderer (different series / re-entry).
+  if (_gpuRenderer) { _gpuRenderer.destroy(); _gpuRenderer = null; }
+  if (_gpuHandle)   { _gpuHandle = null; }
+
+  if (typeof gpuVolume !== 'undefined') {
+    _gpuHandle   = gpuVolume.uploadVolumeToGPU(mprVolume);   // null on no-GPU machines
+    _gpuRenderer = gpuSlice.init(_gpuHandle);                // null if upload failed
+  }
 
   xIndex = Math.floor(mprVolume.cols   / 2);
   yIndex = Math.floor(mprVolume.rows   / 2);
@@ -230,6 +244,9 @@ function renderAxial(z) {
     crosshair,
     v.cols * v.colSpacing, v.rows * v.rowSpacing);
   document.getElementById('axialLabel').textContent = `AXIAL  —  z ${z + 1} / ${v.slices}`;
+
+  // GPU path — runs alongside CPU, no-op if WebGL unavailable
+  if (_gpuRenderer) _gpuRenderer.renderAxial(z, mprWC, mprWW);
 }
 
 function renderCoronal(y) {
