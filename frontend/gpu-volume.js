@@ -21,8 +21,10 @@
   'use strict';
 
   /**
-   * Normalize volume.buffer (Float32Array, HU values) to [0, 255] Uint8.
-   * Returns { data: Uint8Array, min: number, max: number }.
+   * Normalize volume.buffer (Float32Array, HU values) to [0, 1] Float32.
+   * WebGL2 path uses this directly (R16F texture → ~1024 effective levels).
+   * WebGL1 path converts to Uint8 separately (256 levels, atlas fallback).
+   * Returns { f32: Float32Array, u8: Uint8Array, min, max }.
    */
   function _normalize(buffer) {
     let min = Infinity, max = -Infinity;
@@ -31,11 +33,14 @@
       if (buffer[i] > max) max = buffer[i];
     }
     const range = (max - min) || 1;
-    const data  = new Uint8Array(buffer.length);
+    const f32   = new Float32Array(buffer.length);
+    const u8    = new Uint8Array(buffer.length);
     for (let i = 0; i < buffer.length; i++) {
-      data[i] = ((buffer[i] - min) / range * 255 + 0.5) | 0;
+      const v  = (buffer[i] - min) / range;
+      f32[i]   = v;
+      u8[i]    = (v * 255 + 0.5) | 0;
     }
-    return { data, min, max };
+    return { f32, u8, min, max };
   }
 
   /**
@@ -75,8 +80,8 @@
       return null;
     }
 
-    // ── 1. Normalize to [0, 255] ──────────────────────────────────────────────
-    const { data, min, max } = _normalize(volume.buffer);
+    // ── 1. Normalize ─────────────────────────────────────────────────────────
+    const { f32, u8, min, max } = _normalize(volume.buffer);
 
     // ── 2. Hidden canvas for the WebGL context ────────────────────────────────
     // Kept off-screen; does not interfere with Cornerstone's own canvases.
@@ -115,15 +120,19 @@
       gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R,     gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      // R16F: 16-bit half-float (~1024 levels in [0,1]). Uploading as FLOAT
+      // lets the driver convert float32→float16 automatically. This gives
+      // ~6500× more precision than R8 within a typical CT window (WW=400).
+      // R16F is linearly filterable in WebGL2 without any extension.
       gl.texImage3D(
         gl.TEXTURE_3D,
         0,                  // mip level
-        gl.R8,              // internal format: single-channel 8-bit unorm
+        gl.R16F,            // internal format: 16-bit half-float
         width, height, depth,
         0,                  // border (must be 0)
         gl.RED,             // source format
-        gl.UNSIGNED_BYTE,   // source type
-        data
+        gl.FLOAT,           // source type (driver converts f32→f16)
+        f32
       );
     } else {
       // ── WebGL1 fallback: 2-D atlas (slices stacked top-to-bottom) ─────────
@@ -145,7 +154,7 @@
         0,                  // border
         gl.LUMINANCE,
         gl.UNSIGNED_BYTE,
-        data
+        u8                  // Uint8 — acceptable precision for WebGL1 fallback
       );
     }
 
