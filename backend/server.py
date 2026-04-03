@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydicom.dataset import FileMetaDataset
@@ -103,6 +103,8 @@ async def upload(files: list[UploadFile]):
                             }
                             for r in rois
                         ],
+                        # Path used by GET /rtstruct/?path=... to load full contour data
+                        "path": path,
                     },
                     "instances": [],
                 }
@@ -168,6 +170,70 @@ async def upload(files: list[UploadFile]):
         series_dict[uid]["instances"].sort(key=lambda x: x["instance"])
 
     return series_dict
+
+
+def parse_rtstruct(path: str) -> dict:
+    """
+    Extract ROI names, numbers, and full contour geometry from an RTSTRUCT file.
+
+    RTSTRUCT stores contours in two parallel sequences:
+      StructureSetROISequence  — ROI name + number (no geometry)
+      ROIContourSequence       — geometry, linked by ReferencedROINumber
+
+    ContourData is a flat list of floats [x0,y0,z0, x1,y1,z1, ...] in mm,
+    in the same patient coordinate system as the CT ImagePositionPatient tag.
+    We reshape it into [[x,y,z], ...] triplets.
+    """
+    ds = pydicom.dcmread(path)
+
+    # Build lookup: ROI number → name
+    roi_info: dict[int, str] = {}
+    for roi in getattr(ds, "StructureSetROISequence", []):
+        num  = int(getattr(roi, "ROINumber", 0))
+        name = str(getattr(roi, "ROIName", "?"))
+        roi_info[num] = name
+
+    rois = []
+    for roi_contour in getattr(ds, "ROIContourSequence", []):
+        num  = int(getattr(roi_contour, "ReferencedROINumber", 0))
+        name = roi_info.get(num, "?")
+
+        contours = []
+        for contour in getattr(roi_contour, "ContourSequence", []):
+            data   = [float(v) for v in contour.ContourData]
+            # Reshape flat list into [[x,y,z], ...] and round to 3 dp (μm precision)
+            points = [
+                [round(data[i], 3), round(data[i + 1], 3), round(data[i + 2], 3)]
+                for i in range(0, len(data), 3)
+            ]
+            contours.append(points)
+
+        rois.append({"name": name, "number": num, "contours": contours})
+
+    return {"rois": rois}
+
+
+@app.get("/rtstruct/")
+def get_rtstruct(path: str):
+    """
+    Return full contour geometry for an RTSTRUCT file.
+
+    The path is the server-side file path returned by /upload/ in the
+    'instances' list (same path used for the /files/ static mount).
+    Contour data is fetched on demand rather than included in the upload
+    response because it can be several MB for a large structure set.
+
+    Query param:
+      path — server-side path to the RTSTRUCT .dcm file
+
+    Response: { "rois": [ { "name", "number", "contours": [[[x,y,z],...]] } ] }
+    """
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    try:
+        return parse_rtstruct(path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/")
