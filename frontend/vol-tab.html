@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>3D Volume — DICOM</title>
+
+  <script src="https://unpkg.com/cornerstone-core/dist/cornerstone.js"></script>
+  <script src="https://unpkg.com/dicom-parser/dist/dicomParser.js"></script>
+  <script src="https://unpkg.com/cornerstone-wado-image-loader/dist/cornerstoneWADOImageLoader.bundle.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #1a1a1a; color: #e0e0e0;
+           padding: 16px; display: flex; flex-direction: column; align-items: center; }
+
+    h2 { margin-bottom: 12px; font-size: 15px; color: #aaa; letter-spacing: 1px; }
+
+    /* ── Controls bar ── */
+    #controls {
+      display: flex; gap: 8px; align-items: center;
+      flex-wrap: wrap; justify-content: center; margin-bottom: 12px;
+    }
+    #controls button {
+      background: #2a2a2a; color: #ccc; border: 1px solid #444;
+      padding: 5px 12px; cursor: pointer; border-radius: 4px; font-size: 12px;
+    }
+    #controls button:hover { background: #3a3a3a; color: #fff; }
+    #controls .sep { color: #555; }
+
+    /* ── Volume canvas ── */
+    #volCanvas {
+      width: min(90vw, 640px);
+      height: min(90vw, 640px);
+      background: #000;
+      display: block;
+      cursor: grab;
+      border: 1px solid #333;
+      border-radius: 4px;
+    }
+    #volCanvas:active { cursor: grabbing; }
+
+    /* ── Status ── */
+    #status {
+      margin-top: 8px; font-size: 11px; color: #666;
+      letter-spacing: 0.5px;
+    }
+
+    /* ── Loading overlay ── */
+    #loading {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 14px; padding-top: 80px;
+    }
+    #loading p  { color: #aaa; font-size: 14px; }
+    #progWrap   { width: 280px; height: 4px; background: #333; border-radius: 4px; }
+    #progBar    { height: 100%; width: 0%; background: #4fc3f7; border-radius: 4px; transition: width .15s; }
+  </style>
+</head>
+<body>
+
+  <!-- Shown while volume is loading -->
+  <div id="loading">
+    <p id="loadMsg">Connecting to DICOM viewer…</p>
+    <div id="progWrap"><div id="progBar"></div></div>
+  </div>
+
+  <!-- Shown once rendering is ready -->
+  <div id="viewer" style="display:none; flex-direction:column; align-items:center;">
+    <h2>3D VOLUME — GPU RAY CAST (MIP)</h2>
+
+    <div id="controls">
+      <button onclick="applyPreset(-600,1600)">Lung</button>
+      <button onclick="applyPreset(400,1800)">Bone</button>
+      <button onclick="applyPreset(40,400)">Soft Tissue</button>
+      <button onclick="applyPreset(600,2800)">Brain</button>
+      <span class="sep">|</span>
+      <button onclick="resetCamera()">Reset Camera</button>
+    </div>
+
+    <canvas id="volCanvas"></canvas>
+    <div id="status">Drag to rotate</div>
+  </div>
+
+  <script src="vol-tab-init.js"></script>
+</body>
+</html>

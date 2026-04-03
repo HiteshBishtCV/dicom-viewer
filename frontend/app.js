@@ -267,6 +267,7 @@ function loadSeries(series) {
   if (isVolumetric) {
     const gpuAvail = typeof gpuVolume !== 'undefined' && gpuVolume.isWebGLAvailable();
     mprGpuBtn.style.display = gpuAvail ? 'block' : 'none';
+    document.getElementById('volBtn').style.display = gpuAvail ? 'block' : 'none';
   }
 
   renderMetaPanel(series, total);
@@ -365,6 +366,25 @@ function updateSliceLabel(index, total) {
 }
 
 // ── MPR tab launcher ──────────────────────────────────────────────────────────
+
+function openVolTab() {
+  const tab = window.open('vol-tab.html', '_blank');
+  if (!tab) { alert('Popup blocked — please allow popups for this page.'); return; }
+
+  function onReady(e) {
+    if (e.source !== tab || !e.data || e.data.type !== 'vol-ready') return;
+    window.removeEventListener('message', onReady);
+    const vp = cornerstone.getViewport(element);
+    tab.postMessage({
+      type:     'vol-data',
+      imageIds: window._activeImageIds,
+      series:   window._activeSeries,
+      wc: vp ? Math.round(vp.voi.windowCenter) : 40,
+      ww: vp ? Math.round(vp.voi.windowWidth)  : 400,
+    }, '*');
+  }
+  window.addEventListener('message', onReady);
+}
 
 function openMPRTab(mode) {
   const tab = window.open(`mpr-tab.html?mode=${mode}`, '_blank');
