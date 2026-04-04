@@ -11,6 +11,9 @@ import json
 import math
 import os
 from collections import defaultdict
+import numpy as np
+import scipy.ndimage as ndi
+from skimage.measure import find_contours
 
 app = FastAPI()
 
@@ -1020,6 +1023,417 @@ async def export_rtstruct(payload: dict = Body(...)):
         media_type="application/octet-stream",
         filename=out_name,
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Auto-segmentation: Lung (seed-based) + Heart (automatic)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Volume loading ─────────────────────────────────────────────────────────────
+
+def _load_ct_volume(series_uid: str = "") -> tuple:
+    """
+    Load all CT slices as a 3D HU numpy array.
+
+    Returns:
+      vol       — np.ndarray  shape (nz, nrows, ncols), dtype float32, in HU
+      ct_slices — list[dict]  same order as vol axis-0 (sorted by InstanceNumber)
+                              each dict has the same fields as _load_ct_for_export()
+                              PLUS 'pixel_spacing' and 'slice_thickness'
+    """
+    slices = []
+    for fname in os.listdir(UPLOAD_DIR):
+        fpath = os.path.join(UPLOAD_DIR, fname)
+        try:
+            ds = pydicom.dcmread(fpath)
+            if getattr(ds, "Modality", "") not in ("CT", "MR"):
+                continue
+            if series_uid and str(getattr(ds, "SeriesInstanceUID", "")) != series_uid:
+                continue
+
+            arr   = ds.pixel_array.astype(np.float32)
+            slope = float(getattr(ds, "RescaleSlope",     1.0))
+            inter = float(getattr(ds, "RescaleIntercept", 0.0))
+            hu    = arr * slope + inter
+
+            ipp = [float(v) for v in ds.ImagePositionPatient]
+            iop = [float(v) for v in ds.ImageOrientationPatient]
+            ps  = [float(v) for v in ds.PixelSpacing]
+            st  = float(getattr(ds, "SliceThickness", ps[0]))
+
+            slices.append({
+                "hu":               hu,
+                "ipp":              ipp,
+                "iop":              iop,
+                "ps":               ps,
+                "rows":             int(ds.Rows),
+                "cols":             int(ds.Columns),
+                "instance":         int(getattr(ds, "InstanceNumber", 0)),
+                "slice_thickness":  st,
+                "frame_ref_uid":    str(getattr(ds, "FrameOfReferenceUID", generate_uid())),
+                "study_uid":        str(getattr(ds, "StudyInstanceUID",    generate_uid())),
+                "series_uid":       str(getattr(ds, "SeriesInstanceUID",   "")),
+                "sop_class_uid":    str(getattr(ds, "SOPClassUID",         "")),
+                "sop_instance_uid": str(getattr(ds, "SOPInstanceUID",      generate_uid())),
+            })
+        except Exception:
+            continue
+
+    if not slices:
+        return None, []
+
+    slices.sort(key=lambda s: s["instance"])
+    vol = np.stack([s.pop("hu") for s in slices], axis=0)  # (nz, nr, nc)
+    return vol.astype(np.float32), slices
+
+
+# ── Morphological helpers ──────────────────────────────────────────────────────
+
+def _remove_external_air(mask: np.ndarray) -> np.ndarray:
+    """
+    Zero out any connected component of the binary mask that touches the
+    boundary of the 3D volume — these are external (outside-body) air voxels.
+    """
+    labeled, _ = ndi.label(mask)
+    # Collect all component labels present on any face of the volume.
+    edge_labels = set()
+    edge_labels.update(np.unique(labeled[0]))
+    edge_labels.update(np.unique(labeled[-1]))
+    edge_labels.update(np.unique(labeled[:, 0]))
+    edge_labels.update(np.unique(labeled[:, -1]))
+    edge_labels.update(np.unique(labeled[:, :, 0]))
+    edge_labels.update(np.unique(labeled[:, :, -1]))
+    edge_labels.discard(0)  # background label
+
+    external = np.zeros_like(mask)
+    for lbl in edge_labels:
+        external |= (labeled == lbl)
+    return mask & ~external
+
+
+def _make_closing_struct(r_z: int, r_xy: int) -> np.ndarray:
+    """
+    Build an ellipsoidal 3D structuring element with z-radius r_z and
+    xy-radius r_xy.  Used for morphological closing to fill nodule-holes.
+    """
+    dz   = 2 * r_z  + 1
+    dxy  = 2 * r_xy + 1
+    z, y, x = np.ogrid[-r_z:r_z + 1, -r_xy:r_xy + 1, -r_xy:r_xy + 1]
+    struct = ((z / max(r_z, 1)) ** 2 + (y / max(r_xy, 1)) ** 2 +
+              (x / max(r_xy, 1)) ** 2) <= 1.0
+    return struct.astype(bool)
+
+
+# ── Contour extraction ─────────────────────────────────────────────────────────
+
+def _resample_contour(pts: np.ndarray, n: int) -> list:
+    """
+    Arc-length resample a contour (rows × 2 array) to exactly n points.
+    Returns a list of [col, row] pairs (frontend pixel format).
+    """
+    if len(pts) < 3:
+        return [[float(p[1]), float(p[0])] for p in pts]
+
+    # Build cumulative arc-length.
+    diffs = np.diff(pts, axis=0, append=pts[:1])  # close the loop
+    lens  = np.sqrt((diffs ** 2).sum(axis=1))
+    arc   = np.concatenate([[0], np.cumsum(lens)])
+    total = arc[-1]
+    if total == 0:
+        return [[float(pts[0, 1]), float(pts[0, 0])]] * n
+
+    targets = np.linspace(0, total, n, endpoint=False)
+    indices = np.searchsorted(arc[1:], targets)  # segment index
+    t_local = np.where(
+        lens[indices] > 0,
+        (targets - arc[indices]) / lens[indices],
+        0.0,
+    )
+    rows = pts[indices, 0] + t_local * diffs[indices, 0]
+    cols = pts[indices, 1] + t_local * diffs[indices, 1]
+    return [[round(float(c), 1), round(float(r), 1)] for r, c in zip(rows, cols)]
+
+
+def _mask_to_contours(mask: np.ndarray, n_points: int = 128) -> list:
+    """
+    Extract one polygon contour per axial slice from a 3D binary mask.
+
+    Returns:
+      [ {"slice": z, "points": [[col, row], ...]}, ... ]
+    """
+    contours = []
+    nz = mask.shape[0]
+    for z in range(nz):
+        slc = mask[z].astype(np.uint8)
+        if not slc.any():
+            continue
+        raw = find_contours(slc, level=0.5)
+        if not raw:
+            continue
+        # Take the longest contour (outermost boundary).
+        longest = max(raw, key=len)
+        pts = _resample_contour(longest, n_points)
+        contours.append({"slice": z, "points": pts})
+    return contours
+
+
+# ── Lung segmentation ──────────────────────────────────────────────────────────
+
+def _segment_lungs_3d(
+    vol: np.ndarray,
+    seed_left:  tuple,   # (z, row, col)
+    seed_right: tuple,   # (z, row, col)
+    pixel_spacing:  float,
+    slice_thickness: float,
+) -> tuple:
+    """
+    Segment left and right lungs from a 3D CT volume using seed points.
+
+    Steps:
+      1. Threshold at -300 HU to get air-like voxels.
+      2. Remove external air (voxels touching the volume boundary).
+      3. Label remaining air → select component containing each seed.
+      4. Morphological closing (15 mm radius) to fill lung nodules.
+      5. Fill any remaining holes.
+
+    Returns (left_mask, right_mask) each shape (nz, nr, nc).
+    """
+    # Step 1 — threshold.
+    air_mask = vol < -300
+
+    # Step 2 — remove external air.
+    internal = _remove_external_air(air_mask)
+
+    # Step 3 — connected components; pick by seed.
+    labeled, _ = ndi.label(internal)
+    sz_l, sr_l, sc_l = seed_left
+    sz_r, sr_r, sc_r = seed_right
+    lbl_left  = int(labeled[sz_l, sr_l, sc_l])
+    lbl_right = int(labeled[sz_r, sr_r, sc_r])
+
+    if lbl_left == 0 or lbl_right == 0:
+        raise ValueError(
+            "Seed point is not inside an air-filled region. "
+            "Make sure you clicked inside the lung parenchyma."
+        )
+
+    left_raw  = (labeled == lbl_left)
+    right_raw = (labeled == lbl_right)
+
+    # Step 4 — morphological closing to fill nodule holes.
+    r_xy = max(1, round(15.0 / float(pixel_spacing)))
+    r_z  = max(1, round(15.0 / float(slice_thickness)))
+    struct = _make_closing_struct(r_z, r_xy)
+    left_closed  = ndi.binary_closing(left_raw,  structure=struct)
+    right_closed = ndi.binary_closing(right_raw, structure=struct)
+
+    # Step 5 — fill any remaining internal holes slice-by-slice.
+    left_filled  = ndi.binary_fill_holes(left_closed)
+    right_filled = ndi.binary_fill_holes(right_closed)
+
+    return left_filled, right_filled
+
+
+# ── Heart segmentation ─────────────────────────────────────────────────────────
+
+def _segment_heart_3d(
+    vol: np.ndarray,
+    left_mask:  np.ndarray,
+    right_mask: np.ndarray,
+    pixel_spacing:  float,
+    slice_thickness: float,
+) -> np.ndarray:
+    """
+    Automatically segment the heart from a 3D CT volume.
+
+    Uses the lung masks to locate the mediastinum (region between the two
+    lungs), then thresholds for soft-tissue HU values and selects the
+    largest connected component.
+
+    Steps:
+      1. Find z-range where lungs exist.
+      2. Per slice: mediastinum = column band between the two lungs.
+      3. Heart candidate: 0 < HU < 120 inside mediastinum, excluding lung voxels.
+      4. Largest connected component.
+      5. Morphological closing (12 mm) + per-slice hole fill.
+
+    Returns heart_mask shape (nz, nr, nc).
+    """
+    nz, nr, nc = vol.shape
+    combined = left_mask | right_mask
+
+    # Step 1 — thoracic z-range.
+    z_any = np.where(combined.any(axis=(1, 2)))[0]
+    if len(z_any) == 0:
+        return np.zeros_like(left_mask)
+    z_lo, z_hi = int(z_any[0]), int(z_any[-1])
+
+    # Step 2 — build per-slice mediastinum mask.
+    med_mask = np.zeros((nz, nr, nc), dtype=bool)
+    for z in range(z_lo, z_hi + 1):
+        l_cols = np.where(left_mask[z].any(axis=0))[0]
+        r_cols = np.where(right_mask[z].any(axis=0))[0]
+        if len(l_cols) == 0 or len(r_cols) == 0:
+            continue
+        # In standard axial CT: right lung = smaller col (patient's right side),
+        # left lung = larger col (patient's left side).
+        col_right_max = int(r_cols.max())   # rightmost col of right lung
+        col_left_min  = int(l_cols.min())   # leftmost col of left lung
+        if col_right_max >= col_left_min:
+            # Lungs overlap in this projection — widen med to full row range.
+            col_right_max = max(0, col_left_min - 5)
+        med_mask[z, :, col_right_max:col_left_min] = True
+
+    # Step 3 — soft-tissue threshold inside mediastinum.
+    candidate = (vol > -50) & (vol < 120) & med_mask & ~combined
+
+    # Step 4 — largest connected component.
+    labeled, n_comp = ndi.label(candidate)
+    if n_comp == 0:
+        return np.zeros_like(left_mask)
+    sizes = ndi.sum(candidate, labeled, range(1, n_comp + 1))
+    best_lbl = int(np.argmax(sizes)) + 1
+    heart_raw = (labeled == best_lbl)
+
+    # Step 5 — closing + hole fill.
+    r_xy = max(1, round(12.0 / float(pixel_spacing)))
+    r_z  = max(1, round(12.0 / float(slice_thickness)))
+    struct = _make_closing_struct(r_z, r_xy)
+    heart_closed = ndi.binary_closing(heart_raw, structure=struct)
+    # Fill holes slice-by-slice (cardiac chambers appear dark on non-contrast CT).
+    heart_filled = np.zeros_like(heart_closed)
+    for z in range(nz):
+        heart_filled[z] = ndi.binary_fill_holes(heart_closed[z])
+
+    return heart_filled
+
+
+# ── Segmentation endpoints ─────────────────────────────────────────────────────
+
+@app.post("/segment-lungs")
+async def segment_lungs(payload: dict = Body(...)):
+    """
+    Segment left and right lungs from a CT series using two seed points.
+
+    Body:
+      {
+        "series_uid":  "",
+        "seed_left":   [slice_idx, col, row],   — point inside the left lung
+        "seed_right":  [slice_idx, col, row]    — point inside the right lung
+      }
+
+    Seed coordinates are in image-pixel space (same as the MPR view):
+      col = ix  (axial canvas horizontal axis)
+      row = iy  (axial canvas vertical axis)
+
+    Response:
+      {
+        "left_lung":  [{"slice": z, "points": [[col, row], ...]}, ...],
+        "right_lung": [{"slice": z, "points": [[col, row], ...]}, ...],
+        "slice_count": N
+      }
+    """
+    series_uid = payload.get("series_uid", "")
+    sl = payload.get("seed_left",  [])
+    sr = payload.get("seed_right", [])
+
+    if len(sl) != 3 or len(sr) != 3:
+        raise HTTPException(status_code=422, detail="seed_left and seed_right must be [slice, col, row]")
+
+    # seed format from frontend: [slice_idx, col, row]
+    # numpy vol indexing: vol[z, row, col]
+    seed_left  = (int(sl[0]), int(sl[2]), int(sl[1]))   # (z, row, col)
+    seed_right = (int(sr[0]), int(sr[2]), int(sr[1]))
+
+    vol, ct_slices = _load_ct_volume(series_uid)
+    if vol is None:
+        raise HTTPException(status_code=422, detail="No CT slices found in uploaded_dicoms/")
+
+    ps = ct_slices[0]["ps"]
+    st = ct_slices[0]["slice_thickness"]
+    pixel_spacing = float(ps[0])
+
+    try:
+        left_mask, right_mask = _segment_lungs_3d(
+            vol, seed_left, seed_right, pixel_spacing, st
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    left_contours  = _mask_to_contours(left_mask)
+    right_contours = _mask_to_contours(right_mask)
+
+    return {
+        "left_lung":   left_contours,
+        "right_lung":  right_contours,
+        "slice_count": int(vol.shape[0]),
+    }
+
+
+@app.post("/segment-heart")
+async def segment_heart(payload: dict = Body(...)):
+    """
+    Automatically segment the heart from a CT series.
+
+    The heart location is derived from the lung positions — no seed point
+    is required. The algorithm segments the lungs first (using a fixed
+    auto-seed: first slice's centre of mass of the dark-voxel distribution),
+    then extracts the largest soft-tissue component in the mediastinum.
+
+    Body:
+      { "series_uid": "" }
+
+    Response:
+      { "heart": [{"slice": z, "points": [[col, row], ...]}, ...] }
+    """
+    series_uid = payload.get("series_uid", "")
+
+    vol, ct_slices = _load_ct_volume(series_uid)
+    if vol is None:
+        raise HTTPException(status_code=422, detail="No CT slices found in uploaded_dicoms/")
+
+    ps = ct_slices[0]["ps"]
+    st = ct_slices[0]["slice_thickness"]
+    pixel_spacing = float(ps[0])
+
+    # Automatically locate lung seeds: find the first axial slice with
+    # clearly dark tissue, then pick seeds from the left and right thirds.
+    nz, nr, nc = vol.shape
+    auto_left, auto_right = None, None
+    for z in range(nz // 4, 3 * nz // 4):
+        dark = (vol[z] < -400)
+        if dark.sum() < 200:
+            continue
+        rows_d, cols_d = np.where(dark)
+        centroid_c = int(cols_d.mean())
+        # Left third and right third of col range within the dark region.
+        c_min, c_max = int(cols_d.min()), int(cols_d.max())
+        c_left_seed  = c_min + (c_max - c_min) // 4
+        c_right_seed = c_max - (c_max - c_min) // 4
+        r_seed = int(rows_d.mean())
+        if (dark[r_seed, c_left_seed] and dark[r_seed, c_right_seed]
+                and c_left_seed != c_right_seed):
+            auto_left  = (z, r_seed, c_left_seed)
+            auto_right = (z, r_seed, c_right_seed)
+            break
+
+    if auto_left is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Could not auto-locate lungs. Upload a thoracic CT series."
+        )
+
+    try:
+        left_mask, right_mask = _segment_lungs_3d(
+            vol, auto_left, auto_right, pixel_spacing, st
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Auto lung seed failed: {e}")
+
+    heart_mask = _segment_heart_3d(vol, left_mask, right_mask, pixel_spacing, st)
+    heart_contours = _mask_to_contours(heart_mask)
+
+    return {"heart": heart_contours}
 
 
 @app.get("/")

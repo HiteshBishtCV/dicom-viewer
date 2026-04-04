@@ -160,6 +160,36 @@
       </div>
     </div>
 
+    <!-- Auto-Segment panel -->
+    <div id="mprAutoSegPanel" style="margin-top:12px;border-top:1px solid #2a2a2a;padding-top:10px;">
+      <div style="font-size:10px;font-weight:700;color:#555;letter-spacing:0.8px;
+                  text-transform:uppercase;margin-bottom:6px;">Auto-Segment</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+        <button id="mprSegLungBtn" onclick="startLungSeedPicker()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;"
+          title="Click two seed points (left lung, right lung) to auto-segment both lungs">
+          🫁 Segment Lungs
+        </button>
+        <button id="mprSegHeartBtn" onclick="runHeartSegmentation()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;"
+          title="Automatically segment the heart (runs lung detection internally)">
+          ❤ Segment Heart
+        </button>
+        <button onclick="cancelSegPicker()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#555;border:1px solid #333;"
+          title="Cancel current seed-picking operation">
+          ✕ Cancel
+        </button>
+      </div>
+      <div id="mprSegStatus"
+           style="display:none;color:#aaa;font-size:12px;margin-top:6px;
+                  padding:4px 8px;background:#222;border-radius:3px;border-left:2px solid #4fc3f7;">
+      </div>
+    </div>
+
     <!-- ROI list + file pickers below the three-pane grid -->
     <div id="mprRoiPanel" style="margin-top:12px;">
       <div style="font-size:10px;font-weight:700;color:#666;letter-spacing:0.8px;

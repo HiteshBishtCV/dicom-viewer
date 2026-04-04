@@ -173,6 +173,196 @@ async function exportSelectedMprRoi() {
   select.value         = '';
 }
 
+// ── Auto-segmentation glue ────────────────────────────────────────────────────
+//
+// Lung segmentation requires two user seed points (left then right lung).
+// Heart segmentation is fully automatic — it runs its own internal lung
+// detection to find the mediastinum.
+//
+// Seed-picker state machine:
+//   _segPickState === null        — idle
+//   _segPickState === 'left'      — waiting for left-lung click
+//   _segPickState === 'right'     — waiting for right-lung click (left already saved)
+//
+// The click handler is attached once (on first startLungSeedPicker call)
+// and delegates to _handleSeedClick() which checks _segPickState.
+
+const SEG_API = 'http://127.0.0.1:8000';
+
+// Auto-segmentation structure colours.
+const SEG_COLORS = {
+  'Left Lung':  '#4fc3f7',
+  'Right Lung': '#81c784',
+  'Heart':      '#ef5350',
+};
+
+let _segPickState = null;   // null | 'left' | 'right'
+let _segSeedLeft  = null;   // {slice, col, row}
+let _segListening = false;  // click handler attached to axialCanvas?
+
+function _segStatus(msg, color = '#aaa') {
+  const el = document.getElementById('mprSegStatus');
+  if (!el) return;
+  el.style.display     = msg ? 'block' : 'none';
+  el.style.borderColor = color;
+  el.textContent       = msg;
+}
+
+function _segBtnDisable(disabled) {
+  const lb = document.getElementById('mprSegLungBtn');
+  const hb = document.getElementById('mprSegHeartBtn');
+  if (lb) lb.disabled = disabled;
+  if (hb) hb.disabled = disabled;
+}
+
+/**
+ * Called when the user clicks inside the axial canvas while the seed-picker
+ * is active.  Reads the image-space coordinates from the click event.
+ */
+function _handleSeedClick(e) {
+  if (!_segPickState) return;
+  e.stopPropagation();
+
+  // Convert click → image-space coords (same as mprRoi._fromEvent).
+  const canvas = document.getElementById('axialCanvas');
+  const state  = mprViewState && mprViewState['axialCanvas'];
+  if (!canvas || !state) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const cx   = (e.clientX - rect.left) * (canvas.width  / rect.width);
+  const cy   = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  const col  = Math.round((cx - state.offX) * state.srcW / state.drawW);
+  const row  = Math.round((cy - state.offY) * state.srcH / state.drawH);
+
+  if (col < 0 || row < 0 || col >= state.srcW || row >= state.srcH) return;
+
+  const seed = { slice: zIndex, col, row };
+
+  if (_segPickState === 'left') {
+    _segSeedLeft  = seed;
+    _segPickState = 'right';
+    _segStatus('Seed 1 recorded. Now click inside the RIGHT lung.', '#81c784');
+  } else if (_segPickState === 'right') {
+    _segPickState = null;
+    _detachSeedListener();
+    _runLungSegmentation(_segSeedLeft, seed);
+  }
+}
+
+function _attachSeedListener() {
+  if (_segListening) return;
+  const canvas = document.getElementById('axialCanvas');
+  if (canvas) canvas.addEventListener('click', _handleSeedClick, true);
+  _segListening = true;
+}
+
+function _detachSeedListener() {
+  const canvas = document.getElementById('axialCanvas');
+  if (canvas) canvas.removeEventListener('click', _handleSeedClick, true);
+  _segListening = false;
+}
+
+/** Start the two-click seed-picking flow for lung segmentation. */
+function startLungSeedPicker() {
+  if (typeof mprRoi === 'undefined') return;
+  _segPickState = 'left';
+  _segSeedLeft  = null;
+  _segStatus('Click inside the LEFT lung on the axial view.', '#4fc3f7');
+  _segBtnDisable(true);
+  _attachSeedListener();
+}
+
+/** Cancel any in-progress seed-picking or segmentation. */
+function cancelSegPicker() {
+  _segPickState = null;
+  _segSeedLeft  = null;
+  _detachSeedListener();
+  _segStatus('');
+  _segBtnDisable(false);
+}
+
+/** POST /segment-lungs and import results. */
+async function _runLungSegmentation(seedLeft, seedRight) {
+  _segStatus('Segmenting lungs… (may take a few seconds)', '#4fc3f7');
+  try {
+    const res = await fetch(`${SEG_API}/segment-lungs`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        series_uid:  window._mprSeriesUid ?? '',
+        seed_left:  [seedLeft.slice,  seedLeft.col,  seedLeft.row],
+        seed_right: [seedRight.slice, seedRight.col, seedRight.row],
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail ?? `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const total = _importSegResults({
+      'Left Lung':  data.left_lung,
+      'Right Lung': data.right_lung,
+    });
+    _segStatus(`Lungs segmented — ${total} contours loaded.`, '#81c784');
+  } catch (err) {
+    _segStatus(`Lung segmentation failed: ${err.message}`, '#f44');
+  } finally {
+    _segBtnDisable(false);
+  }
+}
+
+/** POST /segment-heart and import results. */
+async function runHeartSegmentation() {
+  if (typeof mprRoi === 'undefined') return;
+  _segBtnDisable(true);
+  _segStatus('Segmenting heart… (auto-detects lungs first, may take ~10 s)', '#ef5350');
+  try {
+    const res = await fetch(`${SEG_API}/segment-heart`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ series_uid: window._mprSeriesUid ?? '' }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail ?? `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const total = _importSegResults({ 'Heart': data.heart });
+    _segStatus(`Heart segmented — ${total} contours loaded.`, '#ef5350');
+  } catch (err) {
+    _segStatus(`Heart segmentation failed: ${err.message}`, '#f44');
+  } finally {
+    _segBtnDisable(false);
+  }
+}
+
+/**
+ * Convert segmentation results to roiStore/mprRoi format and import.
+ * structureMap: { 'Left Lung': [{slice, points}, ...], ... }
+ * Returns total contour count.
+ */
+function _importSegResults(structureMap) {
+  const rois = [];
+  for (const [name, contours] of Object.entries(structureMap)) {
+    const color = SEG_COLORS[name] ?? '#ffcc44';
+    for (const c of (contours ?? [])) {
+      rois.push({
+        id:         Date.now() + Math.random(),
+        name,
+        slice:      c.slice,
+        points:     c.points,            // already [[col, row], ...]
+        color,
+        source:     'auto-segment',
+        plane:      'axial',
+        canvasId:   'axialCanvas',
+        planeIndex: c.slice,
+      });
+    }
+  }
+  if (rois.length) mprRoi.importRois(rois);
+  return rois.length;
+}
+
 // ── Interpolation glue ────────────────────────────────────────────────────────
 
 /**
