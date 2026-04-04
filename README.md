@@ -350,8 +350,9 @@ pip install numpy scipy scikit-image
 Algorithm:
 - Threshold CT at −300 HU (air-filled voxels)
 - Remove external air by zeroing components that touch the volume boundary
-- 3D seed-based region growing selects the component under each seed point (naturally excludes trachea/bronchi)
-- 3D morphological closing with **15 mm physical radius** fills lung nodules (bright ~−100 to +100 HU spots) by expanding then re-shrinking the mask
+- **Neighbourhood seed lookup** — searches a 20 mm radius around the clicked point so clicks on nodules, vessels, or bronchial walls still resolve to the correct lung region (fixes "point not in air" error)
+- Seed-based region growing selects the component under each seed point (naturally excludes trachea/bronchi)
+- **Per-slice 2D disk closing** with **15 mm physical radius** fills lung nodules (bright ~−100 to +100 HU spots) — 10-100× faster than 3D closing, sub-second on typical CT
 - `scipy.ndimage.binary_fill_holes` removes any remaining interior holes
 
 #### Heart segmentation (automatic)
@@ -359,12 +360,14 @@ Algorithm:
 Click **❤ Segment Heart** — no seed point needed.
 
 Algorithm:
-- Auto-locates lungs internally using a dark-voxel centroid seed heuristic
+- Auto-locates lungs using **2D connected-component analysis** with border removal and a multi-threshold fallback (−300/−200/−100 HU) for robust detection across different CT protocols
 - Builds a per-slice **mediastinum mask** (column band between the two lung boundaries)
-- Thresholds 0–120 HU inside the mediastinum, excluding lung voxels
+- Thresholds 0–150 HU inside the mediastinum, excluding lung voxels
 - Selects the largest connected component
-- 12 mm morphological closing + per-slice hole fill (fills cardiac chambers on non-contrast CT)
+- 12 mm per-slice 2D closing + per-slice hole fill (fills cardiac chambers on non-contrast CT)
 - Note: may include aortic root / pulmonary vessels — edit contours manually if needed
+
+Both endpoints run in a background thread (`asyncio.to_thread`) so the UI and WADO image loader remain fully responsive during segmentation.
 
 #### Output
 
