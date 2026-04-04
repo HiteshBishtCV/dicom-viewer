@@ -443,6 +443,43 @@ function _importSegResults(structureMap) {
   return rois.length;
 }
 
+// ── AI segmentation tab ───────────────────────────────────────────────────────
+
+let _mlSegWindow = null;
+
+/** Open the ML segmentation window, or focus it if already open. */
+function openMlSegTab() {
+  const uid = encodeURIComponent(window._mprSeriesUid ?? '');
+  if (_mlSegWindow && !_mlSegWindow.closed) {
+    _mlSegWindow.focus();
+    // Re-send series UID in case the window was opened before the series was known.
+    _mlSegWindow.postMessage({ type: 'ml-seg-series', series_uid: window._mprSeriesUid ?? '' }, '*');
+    return;
+  }
+  _mlSegWindow = window.open(`ml-seg-tab.html?series_uid=${uid}`, 'ml-seg');
+}
+
+// Listen for ML segmentation results sent back from the ML seg window.
+window.addEventListener('message', e => {
+  if (!e.data || e.data.type !== 'ml-seg-result') return;
+  const rois = e.data.rois;
+  if (!Array.isArray(rois) || !rois.length) return;
+  if (typeof mprRoi === 'undefined') return;
+
+  // Wipe existing auto-segment / ml-segment ROIs with the same structure names
+  // so re-running doesn't double-stack contours.
+  const newNames = new Set(rois.map(r => r.name));
+  mprRoi.getRois()
+    .filter(r => newNames.has(r.name) && (r.source === 'ml-segment' || r.source === 'auto-segment'))
+    .forEach(r => mprRoi.deleteRoi(r.id));
+
+  mprRoi.importRois(rois);
+
+  const total = rois.length;
+  const structs = [...newNames].join(', ');
+  _segStatus(`AI segmentation loaded: ${structs} — ${total} contours.`, '#4fc3f7');
+});
+
 // ── Interpolation glue ────────────────────────────────────────────────────────
 
 /**

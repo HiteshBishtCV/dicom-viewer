@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>AI Segmentation — DICOM</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: sans-serif; background: #1a1a1a; color: #e0e0e0;
+      padding: 24px; min-height: 100vh;
+    }
+
+    h2 { font-size: 18px; font-weight: 700; color: #4fc3f7; margin-bottom: 4px; }
+    .subtitle { font-size: 12px; color: #666; margin-bottom: 20px; }
+
+    .card {
+      background: #222; border: 1px solid #333; border-radius: 8px;
+      padding: 16px; margin-bottom: 16px;
+    }
+    .card-title {
+      font-size: 10px; font-weight: 700; color: #555; letter-spacing: 1px;
+      text-transform: uppercase; margin-bottom: 12px;
+    }
+
+    /* organ checkboxes */
+    .organ-grid { display: flex; gap: 10px; flex-wrap: wrap; }
+    .organ-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: #2a2a2a; border: 1px solid #444; border-radius: 6px;
+      padding: 6px 12px; cursor: pointer; transition: border-color .15s;
+    }
+    .organ-chip:hover { border-color: #666; }
+    .organ-chip input[type=checkbox] { accent-color: #4fc3f7; width: 14px; height: 14px; }
+    .organ-chip .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .organ-chip label { font-size: 13px; cursor: pointer; }
+
+    /* quality toggle */
+    .quality-row { display: flex; gap: 8px; align-items: center; }
+    .quality-btn {
+      background: #2a2a2a; border: 1px solid #444; border-radius: 5px;
+      padding: 5px 14px; cursor: pointer; font-size: 12px; color: #aaa;
+      transition: all .15s;
+    }
+    .quality-btn.active { background: #1a3a5a; color: #4fc3f7; border-color: #0078d4; font-weight: 700; }
+    .quality-hint { font-size: 11px; color: #555; }
+
+    /* run button */
+    #runBtn {
+      width: 100%; padding: 12px; border-radius: 6px; border: none; cursor: pointer;
+      font-size: 15px; font-weight: 700; letter-spacing: 0.5px;
+      background: linear-gradient(135deg, #0a4a7a, #0078d4);
+      color: #fff; transition: opacity .15s;
+    }
+    #runBtn:disabled { opacity: 0.45; cursor: not-allowed; }
+    #runBtn:not(:disabled):hover { opacity: 0.88; }
+
+    /* progress */
+    #progressWrap { display: none; margin-top: 12px; }
+    #progressBar {
+      height: 4px; border-radius: 4px; background: #4fc3f7;
+      width: 0%; transition: width .4s; animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:.7} 50%{opacity:1} }
+    #statusMsg {
+      font-size: 12px; color: #aaa; margin-top: 8px;
+      padding: 6px 10px; background: #1a1a1a; border-radius: 4px;
+      border-left: 3px solid #444;
+    }
+
+    /* install notice */
+    #installNotice {
+      display: none; background: #1a2a1a; border: 1px solid #2e4a2e;
+      border-radius: 8px; padding: 14px; margin-bottom: 16px;
+    }
+    #installNotice .title { color: #81c784; font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+    #installNotice code {
+      display: block; background: #111; color: #4fc3f7; font-size: 12px;
+      padding: 8px 10px; border-radius: 4px; margin-top: 6px; user-select: all;
+    }
+    #installNotice .note { font-size: 11px; color: #666; margin-top: 6px; }
+
+    /* results */
+    #resultsCard { display: none; }
+    .struct-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 0; border-bottom: 1px solid #2a2a2a;
+    }
+    .struct-row:last-child { border-bottom: none; }
+    .struct-dot { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+    .struct-name { font-size: 13px; flex: 1; }
+    .struct-count { font-size: 11px; color: #666; }
+    .struct-ok { font-size: 13px; color: #81c784; }
+
+    /* action buttons */
+    .action-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+    .action-btn {
+      padding: 7px 16px; border-radius: 5px; border: 1px solid #444;
+      background: #2a2a2a; color: #ccc; font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: all .15s;
+    }
+    .action-btn:hover { background: #333; color: #fff; }
+    .action-btn.primary { background: #1a3a5a; color: #4fc3f7; border-color: #0078d4; }
+    .action-btn.primary:hover { background: #0a5a9a; }
+  </style>
+</head>
+<body>
+
+  <h2>🤖 AI Organ Segmentation</h2>
+  <div class="subtitle" id="seriesInfo">Powered by TotalSegmentator · fast CPU mode</div>
+
+  <!-- Install notice (shown if TotalSegmentator not installed) -->
+  <div id="installNotice">
+    <div class="title">⚠ TotalSegmentator not installed</div>
+    Run the following in your backend virtualenv, then reload this page:
+    <code>pip install TotalSegmentator</code>
+    <div class="note">
+      ~300 MB of model weights are downloaded automatically on first run.<br>
+      Subsequent runs use the cached weights.
+    </div>
+  </div>
+
+  <!-- Configuration -->
+  <div class="card" id="configCard">
+    <div class="card-title">Structures to segment</div>
+    <div class="organ-grid">
+      <div class="organ-chip">
+        <input type="checkbox" id="chkHeart" checked>
+        <span class="dot" style="background:#ef5350;"></span>
+        <label for="chkHeart">Heart</label>
+      </div>
+      <div class="organ-chip">
+        <input type="checkbox" id="chkLeftLung" checked>
+        <span class="dot" style="background:#4fc3f7;"></span>
+        <label for="chkLeftLung">Left Lung</label>
+      </div>
+      <div class="organ-chip">
+        <input type="checkbox" id="chkRightLung" checked>
+        <span class="dot" style="background:#81c784;"></span>
+        <label for="chkRightLung">Right Lung</label>
+      </div>
+    </div>
+
+    <div class="card-title" style="margin-top:16px;">Quality</div>
+    <div class="quality-row">
+      <button class="quality-btn active" id="btnFast" onclick="setQuality(true)">Fast (~30 s)</button>
+      <button class="quality-btn" id="btnFull" onclick="setQuality(false)">Full (~3–5 min)</button>
+      <span class="quality-hint" id="qualityHint">3 mm isotropic, good for planning</span>
+    </div>
+  </div>
+
+  <!-- Run button + progress -->
+  <button id="runBtn" onclick="runSegmentation()">▶ Run Segmentation</button>
+  <div id="progressWrap">
+    <div style="background:#333;border-radius:4px;height:4px;">
+      <div id="progressBar"></div>
+    </div>
+    <div id="statusMsg"></div>
+  </div>
+
+  <!-- Results -->
+  <div class="card" id="resultsCard" style="margin-top:16px;">
+    <div class="card-title">Results</div>
+    <div id="structList"></div>
+    <div class="action-row">
+      <button class="action-btn primary" id="btnLoadMPR" onclick="sendToMPR()">
+        ↩ Load in MPR View
+      </button>
+      <button class="action-btn" onclick="saveToBackend()">
+        ↑ Save ROIs
+      </button>
+      <button class="action-btn" id="btnRtstruct" onclick="exportRtstruct()">
+        ⬇ RTSTRUCT
+      </button>
+    </div>
+    <div id="savedMsg" style="font-size:11px;color:#666;margin-top:8px;display:none;"></div>
+  </div>
+
+  <script src="roi-save.js"></script>
+  <script src="ml-seg-tab-init.js"></script>
+
+</body>
+</html>

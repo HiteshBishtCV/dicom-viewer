@@ -1870,6 +1870,179 @@ async def segment_heart(payload: dict = Body(...)):
     return result
 
 
+@app.get("/check-totalseg")
+def check_totalseg():
+    """Return whether TotalSegmentator is installed and its version."""
+    try:
+        import totalsegmentator
+        ver = getattr(totalsegmentator, "__version__", "unknown")
+        return {"installed": True, "version": ver}
+    except ImportError:
+        return {"installed": False, "version": None}
+
+
+@app.post("/ml-segment")
+async def ml_segment(payload: dict = Body(...)):
+    """
+    Run TotalSegmentator (fast CPU mode) to segment Heart, Left Lung, Right Lung.
+
+    Body: { "series_uid": "...", "fast": true }
+    Response: {
+      "Heart":       [{slice, points}, ...],
+      "Left Lung":   [...],
+      "Right Lung":  [...],
+      "saved_file":  "ml_seg_<timestamp>.json"
+    }
+
+    Requires:  pip install TotalSegmentator
+    First run downloads ~300 MB of model weights to ~/.totalsegmentator/.
+    """
+    series_uid = payload.get("series_uid", "")
+    fast       = bool(payload.get("fast", True))
+
+    def _run():
+        # ── Import dependencies ───────────────────────────────────────────────
+        try:
+            import SimpleITK as sitk
+        except ImportError:
+            raise RuntimeError(
+                "SimpleITK not found. Install TotalSegmentator which pulls it in: "
+                "pip install TotalSegmentator"
+            )
+        try:
+            from totalsegmentator.python_api import totalsegmentator as ts_run
+        except ImportError:
+            raise RuntimeError(
+                "TotalSegmentator not installed. Run:  pip install TotalSegmentator"
+            )
+
+        # ── Collect DICOM files for the series ───────────────────────────────
+        entries = []
+        for fname in os.listdir(UPLOAD_DIR):
+            fpath = os.path.join(UPLOAD_DIR, fname)
+            try:
+                ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+                if getattr(ds, "Modality", "") not in ("CT", "MR"):
+                    continue
+                if series_uid and str(getattr(ds, "SeriesInstanceUID", "")) != series_uid:
+                    continue
+                entries.append((int(getattr(ds, "InstanceNumber", 0)), fpath))
+            except Exception:
+                pass
+        if not entries:
+            raise RuntimeError("No CT slices found for this series.")
+        entries.sort(key=lambda x: x[0])
+        fpaths = [p for _, p in entries]
+
+        # ── Build SimpleITK image from sorted DICOM files ─────────────────────
+        reader = sitk.ImageSeriesReader()
+        reader.SetFileNames(fpaths)
+        ct_img = reader.Execute()
+
+        # ── Run TotalSegmentator ──────────────────────────────────────────────
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ts_run(
+                ct_img,
+                pathlib.Path(tmpdir),
+                fast=fast,
+                task="total",
+                quiet=True,
+                device="cpu",
+            )
+            seg_path = os.path.join(tmpdir, "segmentation.nii.gz")
+            if not os.path.exists(seg_path):
+                # Some versions write the seg differently
+                nii_files = [f for f in os.listdir(tmpdir) if f.endswith(".nii.gz")]
+                if not nii_files:
+                    raise RuntimeError("TotalSegmentator produced no output file.")
+                seg_path = os.path.join(tmpdir, nii_files[0])
+            seg_img = sitk.ReadImage(seg_path)
+
+        seg_arr = sitk.GetArrayFromImage(seg_img)   # (nz, nr, nc) int16
+
+        # ── Find label IDs from TotalSegmentator's class map ─────────────────
+        try:
+            from totalsegmentator.map_to_binary import class_map
+            cmap = class_map.get("total", {})
+            if not cmap:
+                # Some versions store it under a different key
+                for k in class_map:
+                    cmap = class_map[k]
+                    if cmap:
+                        break
+        except Exception:
+            cmap = {}
+
+        # inv: name → label_id
+        inv = {name: lid for lid, name in cmap.items()}
+
+        # Structures we want
+        WANT = {
+            "Heart":      [v for k, v in inv.items() if k == "heart"],
+            "Left Lung":  [v for k, v in inv.items() if "lung" in k and "left"  in k],
+            "Right Lung": [v for k, v in inv.items() if "lung" in k and "right" in k],
+        }
+
+        # Fallback hard-coded IDs if class_map lookup failed (TotalSegmentator v1/v2)
+        FALLBACK = {
+            "Heart":      [52],
+            "Left Lung":  [13, 14],
+            "Right Lung": [15, 16, 17],
+        }
+        for name in WANT:
+            if not WANT[name]:
+                WANT[name] = FALLBACK[name]
+
+        # ── Build masks + contours ────────────────────────────────────────────
+        COLORS = {"Heart": "#ef5350", "Left Lung": "#4fc3f7", "Right Lung": "#81c784"}
+        results = {}
+        roi_list = []
+        ts_now = int(__import__("time").time() * 1000)
+
+        for name, label_ids in WANT.items():
+            mask = np.zeros(seg_arr.shape, dtype=bool)
+            for lid in label_ids:
+                mask |= (seg_arr == lid)
+            contours = _mask_to_contours(mask)
+            results[name] = contours
+
+            color = COLORS.get(name, "#ffcc44")
+            for c in contours:
+                roi_list.append({
+                    "id":         ts_now + len(roi_list),
+                    "name":       name,
+                    "slice":      c["slice"],
+                    "points":     c["points"],
+                    "color":      color,
+                    "source":     "ml-segment",
+                    "plane":      "axial",
+                    "canvasId":   "axialCanvas",
+                    "planeIndex": c["slice"],
+                })
+
+        # ── Auto-save ROIs to backend ─────────────────────────────────────────
+        import time as _time
+        ts_str = _time.strftime("%Y%m%d_%H%M%S")
+        fname  = f"ml_seg_{ts_str}.json"
+        fpath  = os.path.join(ROI_SAVE_DIR, fname)
+        with open(fpath, "w") as fh:
+            json.dump({"rois": roi_list, "source": "ml-segment"}, fh)
+
+        results["saved_file"] = fname
+        results["roi_list"]   = roi_list   # for postMessage to MPR tab
+        return results
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except RuntimeError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ML segmentation error: {e}")
+
+    return result
+
+
 @app.get("/")
 def root():
     return {"message": "Server is running"}
