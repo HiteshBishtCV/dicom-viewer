@@ -213,7 +213,8 @@ const mprRoi = (() => {
     }
 
     _wip.points.push({ ix: coords.ix, iy: coords.iy });
-    _redrawCanvas(canvasId);
+    // Full re-render so vertex addition is drawn on a clean frame.
+    _requestRedraw();
   }
 
   function _onDblClick(e, canvasId) {
@@ -225,7 +226,9 @@ const mprRoi = (() => {
   // ── Shared mouse handlers (draw rubber-band + edit drag) ───────────────────
 
   function _onMouseMove(e, canvasId) {
-    // Draw mode: update rubber-band endpoint.
+    // Draw mode: update rubber-band endpoint then trigger a clean full re-render.
+    // Calling _redrawCanvas() directly would accumulate strokes without clearing;
+    // _requestRedraw() → updateAllViews() → _doRender() clears the canvas first.
     if (_drawing && _wip && _wip.canvasId === canvasId) {
       const canvas = document.getElementById(canvasId);
       if (!canvas) return;
@@ -234,7 +237,7 @@ const mprRoi = (() => {
         x: (e.clientX - rect.left) * (canvas.width  / rect.width),
         y: (e.clientY - rect.top)  * (canvas.height / rect.height),
       };
-      _redrawCanvas(canvasId);
+      _requestRedraw();
       return;
     }
 
@@ -245,43 +248,39 @@ const mprRoi = (() => {
       const roi = _rois.find(r => r.id === _dragState.roiId);
       if (roi) {
         roi.points[_dragState.vertexIdx] = { ix: coords.ix, iy: coords.iy };
-        _redrawCanvas(canvasId);
+        _requestRedraw();
       }
     }
   }
 
   function _onMouseDown(e, canvasId) {
     if (!_editing) return;
-    e.stopPropagation();   // block crosshair navigation
+    e.stopPropagation();
 
     const coords = _fromEvent(e, canvasId);
     if (!coords) {
-      // Click outside image area → deselect.
       _selectedId = null;
-      redrawAll();
+      _requestRedraw();
       return;
     }
 
-    // Vertex hit takes priority over body selection.
     const vhit = _findVertex(coords.cx, coords.cy, canvasId);
     if (vhit) {
       _selectedId = vhit.roiId;
       _dragState  = { canvasId, roiId: vhit.roiId, vertexIdx: vhit.vertexIdx };
       const canvas = document.getElementById(canvasId);
       if (canvas) canvas.style.cursor = 'grabbing';
-      redrawAll();
+      _requestRedraw();
       return;
     }
 
-    // Body click — select or deselect.
     _selectedId = _findRoi(coords.cx, coords.cy, canvasId);
     _dragState  = null;
-    redrawAll();
+    _requestRedraw();
   }
 
   function _onMouseUp(e, canvasId) {
     if (!_editing || !_dragState || _dragState.canvasId !== canvasId) return;
-    // Commit the moved vertex to roiStore.
     const roi = _rois.find(r => r.id === _dragState.roiId);
     if (roi) _syncToStore(roi);
     _dragState = null;
@@ -290,17 +289,22 @@ const mprRoi = (() => {
   }
 
   function _onMouseLeave(canvasId) {
-    // Draw mode: hide rubber-band.
     if (_drawing && _wip && _wip.canvasId === canvasId) {
       _wip.mousePos = null;
-      _redrawCanvas(canvasId);
+      _requestRedraw();
     }
-    // Edit mode: commit any in-flight drag so it's not lost.
     if (_editing && _dragState && _dragState.canvasId === canvasId) {
       const roi = _rois.find(r => r.id === _dragState.roiId);
       if (roi) _syncToStore(roi);
       _dragState = null;
     }
+  }
+
+  // Route all interactive redraws through the full render pipeline so the
+  // canvas is always cleared by mpr.js before ROI overlays are repainted.
+  function _requestRedraw() {
+    if (typeof updateAllViews === 'function') updateAllViews();
+    else redrawAll();   // fallback (e.g. unit tests)
   }
 
   // ── Edit mode hit testing ──────────────────────────────────────────────────
@@ -489,12 +493,100 @@ const mprRoi = (() => {
       _wip = null;
     }
 
+    // Cross-view position lines: show where ROIs from other planes intersect.
+    _drawCrossViewIndicators(ctx, canvasId, state);
+
     // Closed ROIs for this canvas at the current plane position.
     _rois.filter(r => r.canvasId === canvasId && r.planeIndex === plane)
          .forEach(r => _drawClosed(ctx, r, state, r.id === _selectedId));
 
     // In-progress polygon (draw mode only).
     if (_wip && _wip.canvasId === canvasId) _drawWip(ctx, _wip, state);
+  }
+
+  // Draw thin dashed lines in `canvasId` showing the plane position of every
+  // ROI drawn in the *other* two canvases.
+  //
+  // Coordinate algebra (srcW/srcH = image dimensions for the target canvas):
+  //
+  //   Axial   (ix=col, iy=row, planeIndex=z):
+  //     ← Coronal  ROI at y=planeIndex → horizontal line  at iy = planeIndex
+  //     ← Sagittal ROI at x=planeIndex → vertical   line  at ix = planeIndex
+  //
+  //   Coronal (ix=ncols-1-col, iy=z,   planeIndex=y):
+  //     ← Axial    ROI at z=planeIndex → horizontal line  at iy = planeIndex
+  //     ← Sagittal ROI at x=planeIndex → vertical   line  at ix = srcW-1-planeIndex
+  //
+  //   Sagittal (ix=nrows-1-row, iy=z,  planeIndex=x):
+  //     ← Axial    ROI at z=planeIndex → horizontal line  at iy = planeIndex
+  //     ← Coronal  ROI at y=planeIndex → vertical   line  at ix = srcW-1-planeIndex
+  //
+  function _drawCrossViewIndicators(ctx, canvasId, state) {
+    const others = _rois.filter(r => r.canvasId !== canvasId);
+    if (!others.length) return;
+
+    const { offX, offY, drawW, drawH, srcW, srcH } = state;
+
+    for (const roi of others) {
+      let isHoriz, lineCoord;   // isHoriz true → horizontal; lineCoord in image space
+
+      if (canvasId === 'axialCanvas') {
+        if      (roi.canvasId === 'coronalCanvas')  { isHoriz = true;  lineCoord = roi.planeIndex; }
+        else if (roi.canvasId === 'sagittalCanvas') { isHoriz = false; lineCoord = roi.planeIndex; }
+        else continue;
+
+      } else if (canvasId === 'coronalCanvas') {
+        if      (roi.canvasId === 'axialCanvas')    { isHoriz = true;  lineCoord = roi.planeIndex; }
+        else if (roi.canvasId === 'sagittalCanvas') { isHoriz = false; lineCoord = srcW - 1 - roi.planeIndex; }
+        else continue;
+
+      } else if (canvasId === 'sagittalCanvas') {
+        if      (roi.canvasId === 'axialCanvas')    { isHoriz = true;  lineCoord = roi.planeIndex; }
+        else if (roi.canvasId === 'coronalCanvas')  { isHoriz = false; lineCoord = srcW - 1 - roi.planeIndex; }
+        else continue;
+      } else { continue; }
+
+      // Skip if the indicator falls outside the rendered image area.
+      const max = isHoriz ? srcH : srcW;
+      if (lineCoord < 0 || lineCoord >= max) continue;
+
+      // Convert image-space coordinate to canvas pixels.
+      let x1, y1, x2, y2, labelX, labelY;
+      if (isHoriz) {
+        const cy = offY + (lineCoord / srcH) * drawH;
+        x1 = offX;  y1 = cy;
+        x2 = offX + drawW; y2 = cy;
+        labelX = offX + 4;
+        labelY = cy - 13;
+      } else {
+        const cx = offX + (lineCoord / srcW) * drawW;
+        x1 = cx; y1 = offY;
+        x2 = cx; y2 = offY + drawH;
+        labelX = cx + 4;
+        labelY = offY + 4;
+      }
+
+      ctx.save();
+      ctx.strokeStyle = roi.color + 'b3';   // ~70% opacity
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Name tag beside the line.
+      ctx.font         = 'bold 10px sans-serif';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = 'rgba(0,0,0,0.55)';
+      ctx.fillText(roi.name, labelX + 1, labelY + 1);
+      ctx.fillStyle    = roi.color + 'cc';
+      ctx.fillText(roi.name, labelX, labelY);
+
+      ctx.restore();
+    }
   }
 
   function _drawClosed(ctx, roi, state, selected) {
