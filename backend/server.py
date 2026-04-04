@@ -1582,7 +1582,19 @@ def _do_segment_heart_seeded(
             if m is not None:
                 bbox_mask &= m
 
-    # ── 2. Per-slice mediastinum detection ────────────────────────────────────
+    # ── 2. Adaptive HU threshold from seed neighbourhood ─────────────────────
+    # Sample a ~15 mm patch around the seed and use its median HU ± 100 as
+    # the tissue window.  This adapts automatically to non-contrast, thick-
+    # slice, or unusual-protocol CTs instead of relying on a fixed range.
+    r_sample = max(3, round(15.0 / float(pixel_spacing)))
+    r0s = max(0, seed_row - r_sample);  r1s = min(nr, seed_row + r_sample + 1)
+    c0s = max(0, seed_col - r_sample);  c1s = min(nc, seed_col + r_sample + 1)
+    seed_patch = vol[seed_z, r0s:r1s, c0s:c1s]
+    hu_center  = float(np.median(seed_patch))
+    hu_lo      = hu_center - 100.0
+    hu_hi      = hu_center + 100.0
+
+    # ── 3. Per-slice mediastinum detection ────────────────────────────────────
     def _mediastinum_slice(z):
         air = vol[z] < -300
         labeled_2d, n = ndi.label(air)
@@ -1623,31 +1635,43 @@ def _do_segment_heart_seeded(
         med[:, c_start:c_end] = True
         return med
 
-    # ── 3. Candidate mask = soft tissue ∩ mediastinum ∩ bbox ─────────────────
+    # ── 4. Candidate mask = adaptive tissue ∩ mediastinum ∩ bbox ────────────
+    # When the user drew a bbox the region is already constrained, so we use
+    # mediastinum detection as an optional refinement and fall back to bbox-
+    # only for slices where mediastinum detection returns empty (e.g. lung
+    # not visible on that slice).
+    has_bbox  = bool(bbox)
     candidate = np.zeros((nz, nr, nc), dtype=bool)
     for z in range(nz):
         if not bbox_mask[z].any():
             continue
+        slc_soft = (vol[z] >= hu_lo) & (vol[z] <= hu_hi)
         med = _mediastinum_slice(z)
-        if not med.any():
-            continue
-        slc_soft = (vol[z] > -30) & (vol[z] < 150)
-        candidate[z] = slc_soft & med & bbox_mask[z]
+        if has_bbox:
+            if med.any():
+                candidate[z] = slc_soft & med & bbox_mask[z]
+            else:
+                # Mediastinum detection failed for this slice — fall back to bbox only
+                candidate[z] = slc_soft & bbox_mask[z]
+        else:
+            if not med.any():
+                continue
+            candidate[z] = slc_soft & med
 
-    # ── 4. Propagate from seed ────────────────────────────────────────────────
+    # ── 5. Propagate from seed ────────────────────────────────────────────────
     raw = _propagate_from_seed_2d(candidate, seed_z, seed_row, seed_col, pixel_spacing)
     if raw is None:
-        if bbox:
-            raise ValueError(
-                "No cardiac soft tissue found near the seed point inside the drawn box. "
-                "Make sure the seed click and the box both cover the heart region."
-            )
-        raise ValueError(
-            "No cardiac soft tissue found near the seed point. "
-            "Click inside the heart — the gray region between the two lungs on axial view."
+        msg = (
+            f"No tissue found near the seed point (sampled HU ≈ {hu_center:.0f}, "
+            f"window {hu_lo:.0f}–{hu_hi:.0f} HU). "
         )
+        if bbox:
+            msg += "Check that the seed click and the drawn box both cover the heart."
+        else:
+            msg += "Click in the centre of the heart on the axial view."
+        raise ValueError(msg)
 
-    # ── 5. Subtract lung volumes ──────────────────────────────────────────────
+    # ── 6. Subtract lung volumes ──────────────────────────────────────────────
     # Auto-detect lungs and remove them from the heart mask.  This prevents
     # the contour from bleeding into abutting lung parenchyma on boundary slices.
     try:
@@ -1666,7 +1690,7 @@ def _do_segment_heart_seeded(
         raise ValueError("Heart mask became empty after lung subtraction. "
                          "Try placing the seed more centrally inside the heart.")
 
-    # ── 6. 12 mm per-slice closing + hole fill ────────────────────────────────
+    # ── 7. 12 mm per-slice closing + hole fill ────────────────────────────────
     r_xy = max(2, round(12.0 / float(pixel_spacing)))
     return _close_mask_2d(raw, r_xy)
 
