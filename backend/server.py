@@ -1960,53 +1960,89 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
         reader.SetFileNames(fpaths)
         ct_img = reader.Execute()
 
-        # ── 5. Run TotalSegmentator ───────────────────────────────────────────
+        # ── 5. Run TotalSegmentator via subprocess ────────────────────────────
+        # Using a subprocess lets us capture stdout line-by-line so we can
+        # show the real download/inference progress in the UI instead of a
+        # fake ticker.  TotalSegmentator prints tqdm lines like:
+        #   "Downloading: 45%|████ | 60.0M/135M …"
+        #   "Predicting…"  /  "Resampling…"
+        import tempfile, pathlib, subprocess, sys, re
+
         mode_str = "fast" if fast else "full quality"
-        _upd(20, f"Running TotalSegmentator ({mode_str}, {gpu_label})…")
+        _upd(18, f"Preparing CT volume for TotalSegmentator [{gpu_label}]…")
 
-        import tempfile, pathlib, threading
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path = os.path.join(tmpdir, "ct.nii.gz")
+            out_dir = pathlib.Path(tmpdir) / "seg_out"
+            out_dir.mkdir()
 
-        # While TS runs, advance the bar slowly so the UI isn't frozen.
-        # We'll jump to 82% when inference finishes.
-        stop_ticker = threading.Event()
-        def _ticker():
-            pct = 20
-            while not stop_ticker.is_set():
-                _time.sleep(1.5)
-                pct = min(pct + (3 if device == "gpu" else 1), 80)
-                _upd(pct, f"TotalSegmentator inference ({mode_str}, {gpu_label})…")
-        t = threading.Thread(target=_ticker, daemon=True)
-        t.start()
+            _upd(20, "Writing NIfTI file…")
+            sitk.WriteImage(ct_img, in_path)
 
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                in_path  = os.path.join(tmpdir, "ct.nii.gz")
-                out_dir  = pathlib.Path(tmpdir) / "seg_out"
-                out_dir.mkdir()
+            cmd = [
+                sys.executable, "-m", "totalsegmentator",
+                "-i", in_path,
+                "-o", str(out_dir),
+                "--task", "total",
+                "--device", device,
+            ]
+            if fast:
+                cmd.append("--fast")
 
-                # Save CT as NIfTI — newer TotalSegmentator versions require a
-                # file path rather than a SimpleITK Image object.
-                sitk.WriteImage(ct_img, in_path)
+            _upd(22, f"Launching TotalSegmentator ({mode_str}, {gpu_label})…")
 
-                ts_run(
-                    pathlib.Path(in_path),
-                    out_dir,
-                    fast=fast,
-                    task="total",
-                    quiet=True,
-                    device=device,
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            for raw in proc.stdout:
+                line = raw.strip()
+                if not line:
+                    continue
+
+                # Model-weight download: "Downloading: 45%|... 60M/135M ..."
+                m = re.search(r'Downloading[^:]*:\s*(\d+)%', line)
+                if m:
+                    dl = int(m.group(1))
+                    # Map 0-100% download → bar 22-72%
+                    pct = 22 + int(dl * 0.50)
+                    # Extract size info if present: "60.0M/135M"
+                    size_m = re.search(r'([\d.]+[MG])\s*/\s*([\d.]+[MG])', line)
+                    size_str = f" ({size_m.group(1)}/{size_m.group(2)})" if size_m else ""
+                    _upd(pct, f"Downloading model weights: {dl}%{size_str} — one-time download…")
+                    continue
+
+                low = line.lower()
+                # Resampling / preprocessing
+                if "resamp" in low:
+                    _upd(73, f"Resampling CT [{gpu_label}]…")
+                # Inference
+                elif "predict" in low or "infer" in low:
+                    _upd(76, f"Running neural network inference [{gpu_label}]…")
+                # Post-process / saving
+                elif "saving" in low or "writing" in low:
+                    _upd(80, "Saving segmentation…")
+
+            rc = proc.wait()
+            if rc != 0:
+                raise RuntimeError(
+                    f"TotalSegmentator exited with code {rc}. "
+                    "Check the server terminal for details."
                 )
-                seg_path = str(out_dir / "segmentation.nii.gz")
-                if not os.path.exists(seg_path):
-                    nii_files = [f for f in os.listdir(out_dir) if f.endswith(".nii.gz")]
-                    if not nii_files:
-                        raise RuntimeError("TotalSegmentator produced no output file.")
-                    seg_path = str(out_dir / nii_files[0])
-                seg_img = sitk.ReadImage(seg_path)
-                seg_arr = sitk.GetArrayFromImage(seg_img)   # (nz, nr, nc)
-        finally:
-            stop_ticker.set()
-            t.join(timeout=2)
+
+            _upd(82, "Reading segmentation output…")
+            seg_path = str(out_dir / "segmentation.nii.gz")
+            if not os.path.exists(seg_path):
+                nii_files = [f for f in os.listdir(out_dir) if f.endswith(".nii.gz")]
+                if not nii_files:
+                    raise RuntimeError("TotalSegmentator produced no output file.")
+                seg_path = str(out_dir / nii_files[0])
+            seg_img = sitk.ReadImage(seg_path)
+            seg_arr = sitk.GetArrayFromImage(seg_img)   # (nz, nr, nc)
 
         # ── 6. Look up label IDs ──────────────────────────────────────────────
         _upd(82, "Extracting organ masks…")
