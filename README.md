@@ -330,6 +330,11 @@ RTSTRUCT dataset
 - `frontend/roi-save.js`: `roiSave.save()` POSTs full `roiStore` payload; `loadList()` / `load(filename)` for retrieval
 - "↑ Save ROIs" button added to Structures panel
 
+### MPR cross-view ROI indicators + rubber-band fix
+- `mpr-roi.js`: `_drawCrossViewIndicators()` paints a thin dashed coloured guide line in each non-source canvas at the plane position of every ROI drawn in the other two planes (e.g., an axial ROI at z=N appears as a horizontal line at iy=N in both coronal and sagittal)
+- The indicator line carries the ROI name tag so multiple overlapping ROIs are distinguishable
+- `_requestRedraw()` routes all interactive redraws through `updateAllViews()` so mpr.js clears the canvas before repainting — eliminates the dashed-stroke accumulation artefact during polygon drawing
+
 ### ROI naming
 - `roi-draw.js`, `mpr-roi.js`: `window.prompt()` after polygon close; default `ROI_N` accepted on cancel or blank
 - `roi-draw.js`, `mpr-roi.js`: name label rendered at polygon centroid with drop-shadow for legibility
