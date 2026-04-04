@@ -143,7 +143,9 @@ async function _pollJob(job_id, bar, msg) {
       clearInterval(_pollTimer); _pollTimer = null;
       bar.style.background = '#ef5350';
       bar.style.animation  = 'none';
-      _setStatus(`Failed: ${job.error}`, '#ef5350');
+      // Show full error (may include last 15 lines of TS output)
+      const errText = job.error ?? 'Unknown error';
+      _setStatus(errText, '#ef5350');
       document.getElementById('runBtn').disabled = false;
     }
   } catch (_) { /* network blip — keep polling */ }

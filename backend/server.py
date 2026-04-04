@@ -1989,49 +1989,75 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
             if fast:
                 cmd.append("--fast")
 
-            _upd(22, f"Launching TotalSegmentator ({mode_str}, {gpu_label})…")
+            def _run_proc(try_device):
+                """Run TotalSegmentator subprocess, return (seg_arr, captured_lines)."""
+                run_cmd = [
+                    sys.executable, "-m", "totalsegmentator",
+                    "-i", in_path,
+                    "-o", str(out_dir),
+                    "--task", "total",
+                    "--device", try_device,
+                ]
+                if fast:
+                    run_cmd.append("--fast")
 
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
+                print(f"[ML-Seg] CMD: {' '.join(run_cmd)}", flush=True)
+                _upd(22, f"Launching TotalSegmentator ({mode_str}, {try_device.upper()})…")
 
-            for raw in proc.stdout:
-                line = raw.strip()
-                if not line:
-                    continue
+                p = subprocess.Popen(
+                    run_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                tail = []   # last 30 lines for error reporting
 
-                # Model-weight download: "Downloading: 45%|... 60M/135M ..."
-                m = re.search(r'Downloading[^:]*:\s*(\d+)%', line)
-                if m:
-                    dl = int(m.group(1))
-                    # Map 0-100% download → bar 22-72%
-                    pct = 22 + int(dl * 0.50)
-                    # Extract size info if present: "60.0M/135M"
-                    size_m = re.search(r'([\d.]+[MG])\s*/\s*([\d.]+[MG])', line)
-                    size_str = f" ({size_m.group(1)}/{size_m.group(2)})" if size_m else ""
-                    _upd(pct, f"Downloading model weights: {dl}%{size_str} — one-time download…")
-                    continue
+                for raw in p.stdout:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    print(f"[TS] {line}", flush=True)   # always visible in server terminal
+                    tail.append(line)
+                    if len(tail) > 30:
+                        tail.pop(0)
 
-                low = line.lower()
-                # Resampling / preprocessing
-                if "resamp" in low:
-                    _upd(73, f"Resampling CT [{gpu_label}]…")
-                # Inference
-                elif "predict" in low or "infer" in low:
-                    _upd(76, f"Running neural network inference [{gpu_label}]…")
-                # Post-process / saving
-                elif "saving" in low or "writing" in low:
-                    _upd(80, "Saving segmentation…")
+                    # Download progress: "Downloading: 45%|... 60M/135M ..."
+                    m = re.search(r'Downloading[^:]*:\s*(\d+)%', line)
+                    if m:
+                        dl = int(m.group(1))
+                        pct = 22 + int(dl * 0.50)   # map 0-100 → 22-72%
+                        sm  = re.search(r'([\d.]+[MG])\s*/\s*([\d.]+[MG])', line)
+                        ss  = f" ({sm.group(1)}/{sm.group(2)})" if sm else ""
+                        _upd(pct, f"Downloading weights: {dl}%{ss} (cached after this)…")
+                        continue
 
-            rc = proc.wait()
+                    low = line.lower()
+                    if "resamp" in low:
+                        _upd(73, f"Resampling CT [{try_device.upper()}]…")
+                    elif "predict" in low or "infer" in low:
+                        _upd(76, f"Neural network inference [{try_device.upper()}]…")
+                    elif "saving" in low or "writing" in low:
+                        _upd(80, "Saving segmentation…")
+
+                rc = p.wait()
+                return rc, tail
+
+            # Try GPU first; fall back to CPU if it fails.
+            rc, tail = _run_proc(device)
+            if rc != 0 and device == "gpu":
+                print("[ML-Seg] GPU run failed — retrying on CPU…", flush=True)
+                _upd(22, "GPU failed — retrying on CPU…")
+                # Clear output dir before retry
+                import shutil
+                shutil.rmtree(str(out_dir), ignore_errors=True)
+                out_dir.mkdir()
+                rc, tail = _run_proc("cpu")
+
             if rc != 0:
+                snippet = '\n'.join(tail[-15:]) if tail else '(no output captured)'
                 raise RuntimeError(
-                    f"TotalSegmentator exited with code {rc}. "
-                    "Check the server terminal for details."
+                    f"TotalSegmentator failed (exit {rc}).\n\nLast output:\n{snippet}"
                 )
 
             _upd(82, "Reading segmentation output…")
