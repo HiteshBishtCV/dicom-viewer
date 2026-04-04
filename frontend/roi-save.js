@@ -59,6 +59,11 @@ const roiSave = (() => {
         points: r.points,          // already [[x,y], ...]
         color:  r.color  ?? '#ffffff',
         source: r.source ?? 'draw2d',
+        // Preserve MPR-specific fields so save→load round-trips correctly.
+        ...(r.plane          != null ? { plane:          r.plane          } : {}),
+        ...(r.planeIndex     != null ? { planeIndex:     r.planeIndex     } : {}),
+        ...(r.canvasId       != null ? { canvasId:       r.canvasId       } : {}),
+        ...(r.isInterpolated         ? { isInterpolated: true             } : {}),
       })),
     };
 

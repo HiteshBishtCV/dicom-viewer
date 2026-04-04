@@ -47,6 +47,8 @@
 
 const mprRoi = (() => {
 
+  const INTERP_N = 64;    // arc-length resampling resolution for interpolation
+
   const PALETTE = [
     '#ff4444', '#44ff88', '#4499ff', '#ffff44',
     '#ff88ff', '#44ffff', '#ff8844', '#aa44ff',
@@ -444,12 +446,13 @@ const mprRoi = (() => {
 
       const roi = {
         id,
-        name:       r.name      ?? 'Imported',
-        canvasId:   r.canvasId,
-        planeIndex: r.planeIndex ?? 0,
+        name:           r.name      ?? 'Imported',
+        canvasId:       r.canvasId,
+        planeIndex:     r.planeIndex ?? 0,
         // Convert [[ix,iy]] → [{ix,iy}] for internal use.
-        points:     (r.points ?? []).map(p => ({ ix: p[0], iy: p[1] })),
-        color:      r.color ?? PALETTE[_rois.length % PALETTE.length],
+        points:         (r.points ?? []).map(p => ({ ix: p[0], iy: p[1] })),
+        color:          r.color ?? PALETTE[_rois.length % PALETTE.length],
+        isInterpolated: r.isInterpolated ?? false,
       };
       _rois.push(roi);
       existingIds.add(id);
@@ -594,6 +597,14 @@ const mprRoi = (() => {
     if (pts.length < 2) return;
 
     ctx.save();
+
+    // Interpolated contours: dashed + slightly transparent to distinguish from
+    // hand-drawn key frames.
+    if (roi.isInterpolated) {
+      ctx.globalAlpha = 0.65;
+      ctx.setLineDash([5, 3]);
+    }
+
     ctx.strokeStyle = roi.color;
     ctx.fillStyle   = roi.color + '22';
     ctx.lineWidth   = selected ? 2.5 : 1.5;
@@ -717,6 +728,200 @@ const mprRoi = (() => {
     });
   }
 
+  // ── Interpolation engine ──────────────────────────────────────────────────
+  //
+  // Workflow:
+  //   1. User draws several axial ROIs with the same name (key frames).
+  //   2. interpolate(name) fills every integer z-slice between consecutive
+  //      key frames with linearly-interpolated contours.
+  //   3. All generated ROIs carry isInterpolated:true so clearInterpolated()
+  //      can remove them without touching the hand-drawn key frames.
+  //
+  // Algorithm:
+  //   Both key-frame polygons are resampled to INTERP_N arc-length-uniform
+  //   points.  B's starting index is rotated to minimise distance to A
+  //   (avoids twisted interpolation paths).  Each intermediate contour is
+  //   a per-point linear blend weighted by position in the z interval.
+
+  /**
+   * Resample a closed polygon to exactly N uniformly-spaced points by
+   * cumulative arc-length parameterisation.
+   * @param {Array<{ix,iy}>} points
+   * @param {number} N
+   * @returns {Array<{ix,iy}>}
+   */
+  function _arcLengthResample(points, N) {
+    const n = points.length;
+    // Build cumulative arc-length array (closed: last edge → points[0]).
+    const arc = [0];
+    for (let i = 0; i < n; i++) {
+      const a = points[i];
+      const b = points[(i + 1) % n];
+      const dx = b.ix - a.ix, dy = b.iy - a.iy;
+      arc.push(arc[i] + Math.sqrt(dx * dx + dy * dy));
+    }
+    const total = arc[n];
+    if (total === 0) {
+      // Degenerate polygon — return N copies of the first point.
+      return Array.from({ length: N }, () => ({ ix: points[0].ix, iy: points[0].iy }));
+    }
+
+    const out = [];
+    for (let j = 0; j < N; j++) {
+      const target = (j / N) * total;
+      // Binary search for the segment that contains target.
+      let lo = 0, hi = n - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (arc[mid + 1] < target) lo = mid + 1; else hi = mid;
+      }
+      const seg = lo;
+      const segLen = arc[seg + 1] - arc[seg];
+      const t = segLen > 0 ? (target - arc[seg]) / segLen : 0;
+      const a = points[seg], b = points[(seg + 1) % n];
+      out.push({ ix: a.ix + t * (b.ix - a.ix), iy: a.iy + t * (b.iy - a.iy) });
+    }
+    return out;
+  }
+
+  /**
+   * Rotate B's starting index so that its first point aligns as closely as
+   * possible to A's first point.  This prevents twisted-ribbon interpolation
+   * between similarly-shaped polygons that happen to start at different vertices.
+   * @param {Array<{ix,iy}>} A  — reference (not mutated)
+   * @param {Array<{ix,iy}>} B  — candidate (returned rotated)
+   * @returns {Array<{ix,iy}>}
+   */
+  function _alignStartPoint(A, B) {
+    const N = A.length;
+    let bestK = 0, bestCost = Infinity;
+    for (let k = 0; k < N; k++) {
+      let cost = 0;
+      for (let i = 0; i < N; i++) {
+        const dx = A[i].ix - B[(i + k) % N].ix;
+        const dy = A[i].iy - B[(i + k) % N].iy;
+        cost += dx * dx + dy * dy;
+        if (cost >= bestCost) break;   // early exit
+      }
+      if (cost < bestCost) { bestCost = cost; bestK = k; }
+    }
+    return bestK === 0 ? B : B.slice(bestK).concat(B.slice(0, bestK));
+  }
+
+  /**
+   * Generate interpolated ROI objects for all integer z-slices strictly
+   * between roiA.planeIndex and roiB.planeIndex.
+   * @returns {Array} internal ROI objects (not yet added to _rois / roiStore)
+   */
+  function _interpolateContourPair(roiA, roiB) {
+    const [lo, hi] = roiA.planeIndex <= roiB.planeIndex
+      ? [roiA, roiB] : [roiB, roiA];
+    if (hi.planeIndex - lo.planeIndex <= 1) return [];  // adjacent — nothing to fill
+
+    const A  = _arcLengthResample(lo.points, INTERP_N);
+    const B  = _alignStartPoint(A, _arcLengthResample(hi.points, INTERP_N));
+    const ts = Date.now();
+    const result = [];
+
+    for (let z = lo.planeIndex + 1; z < hi.planeIndex; z++) {
+      const t   = (z - lo.planeIndex) / (hi.planeIndex - lo.planeIndex);
+      const pts = A.map((a, i) => ({
+        ix: a.ix + t * (B[i].ix - a.ix),
+        iy: a.iy + t * (B[i].iy - a.iy),
+      }));
+      result.push({
+        id:             ts + z,     // unique: base timestamp + z offset
+        name:           lo.name,
+        canvasId:       'axialCanvas',
+        planeIndex:     z,
+        points:         pts,
+        color:          lo.color,
+        isInterpolated: true,
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Return the names of all structures that have ≥2 axial key-frame ROIs
+   * (i.e., non-interpolated, axialCanvas ROIs at ≥2 distinct planeIndex values).
+   * @returns {string[]}
+   */
+  function getInterpolatable() {
+    const counts = {};
+    _rois
+      .filter(r => r.canvasId === 'axialCanvas' && !r.isInterpolated)
+      .forEach(r => {
+        if (!counts[r.name]) counts[r.name] = new Set();
+        counts[r.name].add(r.planeIndex);
+      });
+    return Object.entries(counts)
+      .filter(([, s]) => s.size >= 2)
+      .map(([name]) => name);
+  }
+
+  /**
+   * Remove all interpolated ROIs for the given structure name.
+   * Leaves hand-drawn key frames untouched.
+   */
+  function clearInterpolated(name) {
+    const toRemove = _rois.filter(r => r.name === name && r.isInterpolated);
+    toRemove.forEach(r => {
+      _rois = _rois.filter(x => x.id !== r.id);
+      if (typeof roiStore !== 'undefined') roiStore.remove(r.id);
+    });
+    _renderPanel();
+    redrawAll();
+  }
+
+  /**
+   * Interpolate all intermediate slices for the named structure.
+   * Key frames are the non-interpolated axial ROIs sharing that name,
+   * sorted by planeIndex.  Generates one contour per integer z-slice
+   * between each consecutive pair.
+   *
+   * Calls clearInterpolated(name) first so re-running is idempotent.
+   *
+   * @param {string} name  — structure name (must match ROI names exactly)
+   * @returns {number}     — count of new interpolated contours added
+   */
+  function interpolate(name) {
+    const keyFrames = _rois
+      .filter(r => r.canvasId === 'axialCanvas' && r.name === name && !r.isInterpolated)
+      .sort((a, b) => a.planeIndex - b.planeIndex);
+
+    if (keyFrames.length < 2) return 0;
+
+    clearInterpolated(name);    // remove any previous pass first
+
+    let total = 0;
+    for (let k = 0; k < keyFrames.length - 1; k++) {
+      const newRois = _interpolateContourPair(keyFrames[k], keyFrames[k + 1]);
+      for (const roi of newRois) {
+        _rois.push(roi);
+        if (typeof roiStore !== 'undefined') {
+          roiStore.add({
+            id:             roi.id,
+            name:           roi.name,
+            slice:          roi.planeIndex,
+            points:         roi.points.map(p => [Math.round(p.ix), Math.round(p.iy)]),
+            color:          roi.color,
+            source:         'mpr',
+            plane:          'axial',
+            planeIndex:     roi.planeIndex,
+            canvasId:       'axialCanvas',
+            isInterpolated: true,
+          });
+        }
+      }
+      total += newRois.length;
+    }
+
+    _renderPanel();
+    redrawAll();
+    return total;
+  }
+
   // ── Public API ─────────────────────────────────────────────────────────────
 
   return {
@@ -726,6 +931,7 @@ const mprRoi = (() => {
     redrawAll, getRois,
     deleteRoi, renameRoi,
     importRois,
+    interpolate, clearInterpolated, getInterpolatable,
   };
 
 })();

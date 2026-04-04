@@ -10,6 +10,7 @@ import datetime
 import json
 import math
 import os
+from collections import defaultdict
 
 app = FastAPI()
 
@@ -891,45 +892,63 @@ def _build_rtstruct(rois: list[dict], ct_slices: list[dict]) -> FileDataset:
 
     ds.ReferencedFrameOfReferenceSequence = DicomSequence([ref_frame])
 
-    # ── StructureSetROISequence — one item per ROI (name + number only) ────────
+    # ── Group ROIs by name ────────────────────────────────────────────────────
+    # ROIs sharing the same name form one RT structure.  This allows a
+    # hand-drawn + interpolated set to export as a single DICOM structure with
+    # one ContourSequence item per slice — the correct DICOM representation.
+    groups: dict = defaultdict(list)
+    for roi in rois:
+        groups[roi.get("name", "ROI")].append(roi)
+    unique_names = list(groups.keys())   # insertion-order stable (Python 3.7+)
+
+    # ── StructureSetROISequence — one item per unique structure name ───────────
     ss_rois = []
-    for i, roi in enumerate(rois):
+    for i, name in enumerate(unique_names):
         item = pydicom.Dataset()
-        item.ROINumber                    = i + 1
+        item.ROINumber                     = i + 1
         item.ReferencedFrameOfReferenceUID = frame_ref_uid
-        item.ROIName                      = roi.get("name", f"ROI_{i + 1}")
-        item.ROIGenerationAlgorithm       = "MANUAL"
+        item.ROIName                       = name
+        item.ROIGenerationAlgorithm        = "MANUAL"
         ss_rois.append(item)
     ds.StructureSetROISequence = DicomSequence(ss_rois)
 
-    # ── ROIContourSequence — 3-D geometry for each ROI ─────────────────────────
+    # ── ROIContourSequence — one entry per unique name, N contour items ────────
+    # Each member ROI of the group becomes one ContourSequence item (one slice).
     roi_contours = []
-    for i, roi in enumerate(rois):
-        contour_data = _roi_contour_data(roi, ct_slices)
-        if len(contour_data) < 9:   # need at least 3 points (3 × xyz = 9 floats)
-            continue
+    for i, name in enumerate(unique_names):
+        members = groups[name]
+        color   = members[0].get("color", "#ff4444")
 
-        contour = pydicom.Dataset()
-        contour.ContourGeometricType  = "CLOSED_PLANAR"
-        contour.NumberOfContourPoints = len(contour_data) // 3
-        contour.ContourData           = contour_data   # flat [x,y,z, x,y,z, ...]
+        contour_items = []
+        for roi in members:
+            contour_data = _roi_contour_data(roi, ct_slices)
+            if len(contour_data) < 9:   # skip degenerate polygons (< 3 points)
+                continue
+            contour = pydicom.Dataset()
+            contour.ContourGeometricType  = "CLOSED_PLANAR"
+            contour.NumberOfContourPoints = len(contour_data) // 3
+            contour.ContourData           = contour_data
+            contour_items.append(contour)
+
+        if not contour_items:
+            continue    # skip structures with no valid geometry
 
         roi_contour = pydicom.Dataset()
         roi_contour.ReferencedROINumber = i + 1
-        roi_contour.ROIDisplayColor     = _hex_to_rgb(roi.get("color", "#ff4444"))
-        roi_contour.ContourSequence     = DicomSequence([contour])
+        roi_contour.ROIDisplayColor     = _hex_to_rgb(color)
+        roi_contour.ContourSequence     = DicomSequence(contour_items)
         roi_contours.append(roi_contour)
 
     ds.ROIContourSequence = DicomSequence(roi_contours)
 
-    # ── RTROIObservationsSequence — clinical type label per ROI ───────────────
+    # ── RTROIObservationsSequence — one entry per unique structure name ────────
     observations = []
-    for i, roi in enumerate(rois):
+    for i, name in enumerate(unique_names):
         obs = pydicom.Dataset()
         obs.ObservationNumber    = i + 1
         obs.ReferencedROINumber  = i + 1
-        obs.ROIObservationLabel  = roi.get("name", f"ROI_{i + 1}")
-        obs.RTROIInterpretedType = "ORGAN"  # generic; relabel in TPS as needed
+        obs.ROIObservationLabel  = name
+        obs.RTROIInterpretedType = "ORGAN"   # relabel in TPS as needed
         obs.ROIInterpreter       = ""
         observations.append(obs)
     ds.RTROIObservationsSequence = DicomSequence(observations)

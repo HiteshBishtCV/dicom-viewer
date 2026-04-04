@@ -123,6 +123,18 @@
           title="Export ROIs as RTSTRUCT DICOM (.dcm)">
           ⬇ RTSTRUCT
         </button>
+        <button id="mprInterpolateBtn" onclick="runMprInterpolate()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;"
+          title="Interpolate between axial key-frame ROIs of the same name">
+          ⟷ Interpolate
+        </button>
+        <button onclick="runMprClearInterpolated()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#555;border:1px solid #333;"
+          title="Remove all interpolated contours for a structure">
+          ✕ Clear Interp
+        </button>
       </div>
     </div>
 
@@ -164,6 +176,12 @@
                      border:1px solid #444;border-radius:3px;padding:3px;
                      font-size:11px;margin-bottom:6px;">
         <option value="">— select file to export —</option>
+      </select>
+      <select id="mprInterpStructSelect"
+              style="display:none;width:320px;background:#1a1a1a;color:#ccc;
+                     border:1px solid #444;border-radius:3px;padding:3px;
+                     font-size:11px;margin-bottom:6px;">
+        <option value="">— select structure —</option>
       </select>
       <div id="mprRoiList">
         <div style="color:#555;font-size:12px;">No ROIs drawn</div>

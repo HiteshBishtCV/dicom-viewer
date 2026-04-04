@@ -172,3 +172,74 @@ async function exportSelectedMprRoi() {
   select.style.display = 'none';
   select.value         = '';
 }
+
+// ── Interpolation glue ────────────────────────────────────────────────────────
+
+/**
+ * Pick a structure name (auto-select if only one candidate), then call
+ * mprRoi.interpolate() to fill all intermediate axial slices.
+ */
+async function runMprInterpolate() {
+  const names = mprRoi.getInterpolatable();
+  if (!names.length) {
+    alert('No structures have 2 or more axial key frames.\nDraw ROIs with the same name on at least 2 different Z slices.');
+    return;
+  }
+
+  const chosen = await _pickInterpStructure(names);
+  if (!chosen) return;
+
+  const count = mprRoi.interpolate(chosen);
+  if (count === 0) {
+    alert(`"${chosen}": key frames are on adjacent slices — nothing to fill.`);
+  } else {
+    alert(`Added ${count} interpolated contour(s) for "${chosen}".`);
+  }
+}
+
+/**
+ * Pick a structure name, then remove all its interpolated contours while
+ * leaving the hand-drawn key frames intact.
+ */
+async function runMprClearInterpolated() {
+  const names = mprRoi.getInterpolatable();
+  if (!names.length) {
+    alert('No interpolatable structures found.');
+    return;
+  }
+
+  const chosen = await _pickInterpStructure(names);
+  if (!chosen) return;
+
+  mprRoi.clearInterpolated(chosen);
+}
+
+/**
+ * Show the shared structure-picker <select> and resolve with the chosen name.
+ * Auto-selects if only one candidate.  Resolves null if the user dismisses.
+ */
+async function _pickInterpStructure(names) {
+  if (names.length === 1) return names[0];
+
+  const select = document.getElementById('mprInterpStructSelect');
+  // Hide the file pickers so they don't overlap.
+  const loadSel   = document.getElementById('mprRoiFileSelect');
+  const exportSel = document.getElementById('mprRoiExportSelect');
+  if (loadSel)   loadSel.style.display   = 'none';
+  if (exportSel) exportSel.style.display = 'none';
+
+  select.innerHTML =
+    '<option value="">— select structure —</option>' +
+    names.map(n => `<option value="${n}">${n}</option>`).join('');
+  select.style.display = 'block';
+
+  return new Promise(resolve => {
+    function onchange() {
+      select.removeEventListener('change', onchange);
+      select.style.display = 'none';
+      resolve(select.value || null);
+      select.value = '';
+    }
+    select.addEventListener('change', onchange);
+  });
+}
