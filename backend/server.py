@@ -1517,12 +1517,81 @@ def _do_segment_heart_seeded(
     Returns heart_mask bool array (nz, nr, nc).
     Raises ValueError if no soft tissue found near the seed.
     """
-    soft_tissue = (vol > -30) & (vol < 200)
-    raw = _propagate_from_seed_2d(soft_tissue, seed_z, seed_row, seed_col, pixel_spacing)
+    nz, nr, nc = vol.shape
+
+    # ── Per-slice mediastinum detection ───────────────────────────────────────
+    # The key problem with a plain soft-tissue mask is that muscle, fat, heart,
+    # and liver all form one connected 2-D region — there's no air boundary
+    # between the heart and the chest wall on most slices.
+    #
+    # Fix: for every slice, find the two largest *internal* lung-air components
+    # (2-D connected components of HU < -300, excluding border-touching ones).
+    # The mediastinum is the column band between the two lung fields.  Soft
+    # tissue outside that band (chest wall, subcutaneous tissue) is masked out.
+    # On non-thoracic slices (no lung air visible) candidate is left empty so
+    # propagation stops naturally at the diaphragm / lung apex.
+
+    def _mediastinum_slice(z):
+        """
+        Returns a 2-D bool array (nr, nc) of the mediastinum on slice z.
+        Falls back to False everywhere if two lung air regions cannot be found
+        (propagation will stop on those slices).
+        """
+        air = vol[z] < -300
+        labeled_2d, n = ndi.label(air)
+        if n == 0:
+            return np.zeros((nr, nc), dtype=bool)
+
+        border = set()
+        for edge in (labeled_2d[0], labeled_2d[-1],
+                     labeled_2d[:, 0], labeled_2d[:, -1]):
+            border.update(map(int, np.unique(edge)))
+        border.discard(0)
+
+        internal = {
+            lbl: int((labeled_2d == lbl).sum())
+            for lbl in range(1, n + 1)
+            if lbl not in border and (labeled_2d == lbl).sum() >= 50
+        }
+        if len(internal) < 2:
+            return np.zeros((nr, nc), dtype=bool)   # no two lung fields → stop here
+
+        top2  = sorted(internal, key=lambda l: -internal[l])[:2]
+        cols_A = np.where((labeled_2d == top2[0]).any(axis=0))[0]
+        cols_B = np.where((labeled_2d == top2[1]).any(axis=0))[0]
+        mean_A = float(cols_A.mean())
+        mean_B = float(cols_B.mean())
+
+        # Smaller mean col → right lung; larger → left lung (DICOM LPS)
+        if mean_A < mean_B:
+            c_start, c_end = int(cols_A.max()), int(cols_B.min())
+        else:
+            c_start, c_end = int(cols_B.max()), int(cols_A.min())
+
+        if c_start >= c_end:
+            # Lungs overlap or no gap — widen a little
+            mid = (c_start + c_end) // 2
+            c_start, c_end = max(0, mid - 30), min(nc, mid + 30)
+
+        med = np.zeros((nr, nc), dtype=bool)
+        med[:, c_start:c_end] = True
+        return med
+
+    # Build per-slice candidate mask: soft tissue (−30 to 150 HU) inside mediastinum
+    candidate = np.zeros((nz, nr, nc), dtype=bool)
+    for z in range(nz):
+        med = _mediastinum_slice(z)
+        if not med.any():
+            continue                          # non-thoracic slice → leave False
+        slc_soft = (vol[z] > -30) & (vol[z] < 150)
+        candidate[z] = slc_soft & med
+
+    raw = _propagate_from_seed_2d(candidate, seed_z, seed_row, seed_col, pixel_spacing)
     if raw is None:
         raise ValueError(
-            "No soft tissue found near the heart seed point. "
-            "Click inside the heart — the bright gray region in the centre of the chest."
+            "No cardiac soft tissue found near the seed point. "
+            "Click inside the heart — the bright gray region between the two lungs "
+            "on the axial view (not on the lungs or chest wall)."
         )
     r_xy = max(2, round(12.0 / float(pixel_spacing)))
     return _close_mask_2d(raw, r_xy)

@@ -412,6 +412,14 @@ const mprRoi = (() => {
     redrawAll();
   }
 
+  function toggleRoiVisibility(id) {
+    const roi = _rois.find(r => r.id === id);
+    if (!roi) return;
+    roi.visible = roi.visible === false ? true : false;
+    _renderPanel();
+    redrawAll();
+  }
+
   function renameRoi(id, name) {
     const roi = _rois.find(r => r.id === id);
     if (!roi) return;
@@ -500,7 +508,7 @@ const mprRoi = (() => {
     _drawCrossViewIndicators(ctx, canvasId, state);
 
     // Closed ROIs for this canvas at the current plane position.
-    _rois.filter(r => r.canvasId === canvasId && r.planeIndex === plane)
+    _rois.filter(r => r.canvasId === canvasId && r.planeIndex === plane && r.visible !== false)
          .forEach(r => _drawClosed(ctx, r, state, r.id === _selectedId));
 
     // In-progress polygon (draw mode only).
@@ -525,7 +533,7 @@ const mprRoi = (() => {
   //     ← Coronal  ROI at y=planeIndex → vertical   line  at ix = srcW-1-planeIndex
   //
   function _drawCrossViewIndicators(ctx, canvasId, state) {
-    const others = _rois.filter(r => r.canvasId !== canvasId);
+    const others = _rois.filter(r => r.canvasId !== canvasId && r.visible !== false);
     if (!others.length) return;
 
     const { offX, offY, drawW, drawH, srcW, srcH } = state;
@@ -700,22 +708,31 @@ const mprRoi = (() => {
       return;
     }
 
-    panel.innerHTML = _rois.map(r => `
+    panel.innerHTML = _rois.map(r => {
+      const visible = r.visible !== false;
+      return `
       <div style="display:flex;align-items:center;gap:6px;padding:2px 0;">
-        <span style="width:10px;height:10px;background:${r.color};border-radius:2px;
-                     flex-shrink:0;display:inline-block;"></span>
+        <button data-vis-id="${r.id}"
+          style="background:none;border:none;cursor:pointer;padding:0;flex-shrink:0;
+                 font-size:14px;line-height:1;color:${visible ? r.color : '#444'};"
+          title="${visible ? 'Hide' : 'Show'}">${visible ? '●' : '○'}</button>
+        <span style="width:10px;height:10px;background:${visible ? r.color : '#333'};
+                     border-radius:2px;flex-shrink:0;display:inline-block;
+                     opacity:${visible ? 1 : 0.4};"></span>
         <input class="mpr-roi-name" type="text" data-id="${r.id}" value="${r.name}"
                style="flex:1;background:#1a1a1a;border:1px solid #444;border-radius:3px;
-                      color:#ccc;font-size:12px;padding:2px 5px;min-width:0;"
+                      color:${visible ? '#ccc' : '#555'};font-size:12px;
+                      padding:2px 5px;min-width:0;"
                title="Click to rename">
         <span style="color:#555;font-size:11px;white-space:nowrap;">
           ${PLANE_LABEL[r.canvasId]} ${r.planeIndex + 1}
         </span>
-        <button data-id="${r.id}"
+        <button data-del-id="${r.id}"
           style="background:none;border:none;color:#f66;cursor:pointer;
                  font-size:11px;padding:0 2px;flex-shrink:0;"
           title="Delete">✕</button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
     panel.querySelectorAll('.mpr-roi-name').forEach(input => {
       const commit = () => renameRoi(Number(input.dataset.id), input.value);
@@ -723,8 +740,12 @@ const mprRoi = (() => {
       input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
     });
 
-    panel.querySelectorAll('button[data-id]').forEach(btn => {
-      btn.addEventListener('click', () => deleteRoi(Number(btn.dataset.id)));
+    panel.querySelectorAll('button[data-vis-id]').forEach(btn => {
+      btn.addEventListener('click', () => toggleRoiVisibility(Number(btn.dataset.visId)));
+    });
+
+    panel.querySelectorAll('button[data-del-id]').forEach(btn => {
+      btn.addEventListener('click', () => deleteRoi(Number(btn.dataset.delId)));
     });
   }
 
@@ -929,7 +950,7 @@ const mprRoi = (() => {
     toggleDrawMode, isDrawing,
     toggleEditMode, isEditing,
     redrawAll, getRois,
-    deleteRoi, renameRoi,
+    deleteRoi, renameRoi, toggleRoiVisibility,
     importRois,
     interpolate, clearInterpolated, getInterpolatable,
   };
