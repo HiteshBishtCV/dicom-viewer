@@ -246,6 +246,17 @@
                        border:1px solid #444;border-radius:3px;padding:3px;font-size:11px;">
           <option value="">— select file —</option>
         </select>
+        <button id="roiExportBtn" onclick="showRoiExportPicker()"
+                style="padding:5px 0;border-radius:4px;cursor:pointer;font-size:12px;
+                       font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;width:100%;"
+                title="Export drawn ROIs as RTSTRUCT DICOM (.dcm)">
+          ⬇ Export RTSTRUCT
+        </button>
+        <select id="roiExportSelect" onchange="exportSelectedRoi()"
+                style="display:none;width:100%;background:#1a1a1a;color:#ccc;
+                       border:1px solid #444;border-radius:3px;padding:3px;font-size:11px;">
+          <option value="">— select file to export —</option>
+        </select>
         <div id="drawnRoiList">
           <div class="sp-empty">No ROIs drawn</div>
         </div>

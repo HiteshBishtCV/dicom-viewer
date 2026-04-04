@@ -216,9 +216,11 @@ function showSeries(seriesData) {
   container.innerHTML = '';
 
   const order  = { image: 0, multiframe: 1, plan: 2, struct: 3, reg: 4 };
-  const sorted = Object.values(seriesData).sort(
-    (a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9)
-  );
+  // Attach the SeriesInstanceUID (dict key) onto each series object so
+  // later code (e.g. RTSTRUCT export) can reference it without extra lookups.
+  const sorted = Object.entries(seriesData)
+    .map(([uid, s]) => { s.uid = uid; return s; })
+    .sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9));
 
   sorted.forEach(series => {
     const btn = document.createElement('button');
@@ -275,9 +277,10 @@ function loadSeries(series) {
   slider.max      = total - 1;
   slider.value    = 0;
 
-  // Expose for MPR button (defined in HTML onclick)
-  window._activeSeries   = series;
-  window._activeImageIds = currentImageIds;
+  // Expose for MPR button and RTSTRUCT export
+  window._activeSeries    = series;
+  window._activeImageIds  = currentImageIds;
+  window._activeSeriesUid = series.uid ?? '';
 
   // Show MPR tab buttons for volumetric series (CT/MR, multi-slice).
   // GPU button is hidden when WebGL is unavailable.
@@ -540,6 +543,39 @@ async function loadSelectedRoi() {
   }
 
   roiDraw.importRois(record.rois);
+  select.style.display = 'none';
+  select.value         = '';
+}
+
+// ── RTSTRUCT export picker ────────────────────────────────────────────────────
+
+async function showRoiExportPicker() {
+  const select = document.getElementById('roiExportSelect');
+  const files  = await roiSave.loadList();
+
+  if (!files.length) {
+    alert('No saved ROI files found.\nSave your ROIs first using "↑ Save ROIs".');
+    return;
+  }
+
+  select.innerHTML =
+    '<option value="">— select file to export —</option>' +
+    files.map(f => `<option value="${f}">${f}</option>`).join('');
+
+  select.style.display = select.style.display === 'none' ? 'block' : 'none';
+}
+
+async function exportSelectedRoi() {
+  const select   = document.getElementById('roiExportSelect');
+  const filename = select.value;
+  if (!filename) return;
+
+  // Pass the CT SeriesInstanceUID if we have an active series loaded.
+  const seriesUid = window._activeSeries
+    ? (window._activeSeriesUid ?? '')
+    : '';
+
+  await roiSave.exportRtstruct(filename, seriesUid);
   select.style.display = 'none';
   select.value         = '';
 }

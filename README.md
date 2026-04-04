@@ -60,7 +60,7 @@ Drawn ROIs can be persisted to the backend with one click.
 - **"↑ Save ROIs" button** in the Structures panel sends all entries from `roiStore` to the backend in one POST
 - Each saved file is self-contained JSON — no DICOM dependency
 - `roi-save.js` is fully decoupled: it reads from `roiStore` only, so ROIs from any drawing tool are included automatically
-- DICOM RTSTRUCT export is a separate future step — not included here
+- DICOM RTSTRUCT export is handled by the `POST /export-rtstruct` endpoint (see below)
 
 ---
 
@@ -266,6 +266,47 @@ dicom-viewer/
 ---
 
 ## Changelog
+
+### RTSTRUCT export
+
+Converts saved ROI polygons to a valid DICOM RT Structure Set file.
+
+#### Coordinate transform (pixel → patient mm)
+
+DICOM PS 3.3 C.7.6.2 defines the forward mapping per slice:
+
+```
+P = IPP  +  col × F_row × ΔC  +  row × F_col × ΔR
+```
+
+| Symbol | Tag | Meaning |
+|--------|-----|---------|
+| IPP | `ImagePositionPatient` | Patient-space position of pixel (0, 0) |
+| F_row | `ImageOrientationPatient[:3]` | Unit vector along increasing column index |
+| F_col | `ImageOrientationPatient[3:]` | Unit vector along increasing row index |
+| ΔC | `PixelSpacing[1]` | mm between adjacent column centres |
+| ΔR | `PixelSpacing[0]` | mm between adjacent row centres |
+
+The frontend stores points as `[[col, row], ...]`. The backend applies the formula above using the IPP of the ROI's slice (matched by InstanceNumber order, same as the frontend).
+
+#### RTSTRUCT DICOM structure
+
+```
+RTSTRUCT dataset
+├── ReferencedFrameOfReferenceSequence  — ties to CT frame + series
+├── StructureSetROISequence             — ROI number + name (no geometry)
+├── ROIContourSequence                  — flat [x,y,z,...] contour data per ROI
+└── RTROIObservationsSequence           — clinical type label per ROI
+```
+
+#### Workflow
+
+1. Draw ROIs on the CT
+2. "↑ Save ROIs" → JSON saved on backend
+3. "⬇ Export RTSTRUCT" → select the saved file → `.dcm` downloads to your machine
+4. Open the RTSTRUCT in any DICOM-compatible TPS or viewer that supports RT Structure Sets
+
+---
 
 ### ROI load + edit
 - `roi-draw.js`: `importRois(array)` — converts backend `[[x,y]]` → internal `{x,y}`, deduplicates by id, syncs to `roiStore`

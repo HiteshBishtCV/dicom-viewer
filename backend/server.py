@@ -1,7 +1,9 @@
 from fastapi import FastAPI, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydicom.dataset import FileMetaDataset
+from pydicom.dataset import FileDataset, FileMetaDataset
+from pydicom.sequence import Sequence as DicomSequence
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 import pydicom
 import datetime
@@ -610,6 +612,327 @@ def load_roi(filename: str):
         raise HTTPException(status_code=404, detail=f"Not found: {safe_name}")
     with open(filepath) as f:
         return json.load(f)
+
+
+# ── RTSTRUCT export ───────────────────────────────────────────────────────────
+
+def _load_ct_for_export(series_uid: str = "") -> list[dict]:
+    """
+    Load CT/MR slices from UPLOAD_DIR for RTSTRUCT coordinate transform.
+
+    Optionally filter by SeriesInstanceUID (pass "" to accept any CT/MR).
+    Returns slices sorted by InstanceNumber ascending — the same ordering
+    used by the frontend loadSeries(), so slice index N in the ROI JSON
+    corresponds to ct_slices[N] here without any extra mapping.
+
+    Each dict contains:
+      ipp, iop, ps            — affine transform parameters (see _pixels_to_patient)
+      instance                — InstanceNumber for sorting
+      frame_ref_uid           — FrameOfReferenceUID written into the RTSTRUCT
+      study_uid               — CT StudyInstanceUID (RTSTRUCT inherits this)
+      series_uid              — CT SeriesInstanceUID (referenced in RTSTRUCT)
+      sop_class_uid           — CT SOPClassUID (per-slice reference)
+      sop_instance_uid        — CT SOPInstanceUID (per-slice reference)
+    """
+    slices = []
+    for fname in os.listdir(UPLOAD_DIR):
+        fpath = os.path.join(UPLOAD_DIR, fname)
+        try:
+            ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+            if getattr(ds, "Modality", "") not in ("CT", "MR"):
+                continue
+            if series_uid and str(getattr(ds, "SeriesInstanceUID", "")) != series_uid:
+                continue
+
+            ipp = [float(v) for v in ds.ImagePositionPatient]
+            iop = [float(v) for v in ds.ImageOrientationPatient]
+            ps  = [float(v) for v in ds.PixelSpacing]
+
+            slices.append({
+                "ipp":              ipp,
+                "iop":              iop,
+                "ps":               ps,
+                "instance":         int(getattr(ds, "InstanceNumber",    0)),
+                "frame_ref_uid":    str(getattr(ds, "FrameOfReferenceUID", generate_uid())),
+                "study_uid":        str(getattr(ds, "StudyInstanceUID",    generate_uid())),
+                "series_uid":       str(getattr(ds, "SeriesInstanceUID",   "")),
+                "sop_class_uid":    str(getattr(ds, "SOPClassUID",         "")),
+                "sop_instance_uid": str(getattr(ds, "SOPInstanceUID",      generate_uid())),
+            })
+        except Exception:
+            continue
+
+    # Must match the frontend sort (InstanceNumber ascending = same as loadSeries).
+    slices.sort(key=lambda s: s["instance"])
+    return slices
+
+
+def _pixels_to_patient(points: list, ct: dict) -> list[float]:
+    """
+    Convert a polygon's pixel coordinates to patient-space mm (ContourData format).
+
+    ── DICOM affine forward transform ────────────────────────────────────────
+    DICOM PS 3.3 C.7.6.2 defines the pixel → patient mapping for each slice:
+
+        P = IPP  +  col × F_row × ΔC  +  row × F_col × ΔR
+
+    where:
+      IPP   = ImagePositionPatient   — patient-space position of pixel (0, 0)
+      F_row = IOP[:3]                — unit vector along increasing column index
+      F_col = IOP[3:]                — unit vector along increasing row index
+      ΔC    = PixelSpacing[1]        — mm between adjacent column centres
+      ΔR    = PixelSpacing[0]        — mm between adjacent row centres
+
+    The frontend stores points as [[col, row], ...] in 0-based pixel indices.
+
+    Returns a flat [x,y,z, x,y,z, ...] list as required by ContourData.
+    """
+    ipp    = ct["ipp"]
+    iop    = ct["iop"]
+    ps     = ct["ps"]
+    F_row  = iop[:3]    # direction cosines along a row  (increasing column)
+    F_col  = iop[3:]    # direction cosines along a col  (increasing row)
+    col_sp = ps[1]      # ΔC — mm between adjacent column centres
+    row_sp = ps[0]      # ΔR — mm between adjacent row centres
+
+    flat = []
+    for (col, row) in points:
+        Px = ipp[0] + col * F_row[0] * col_sp + row * F_col[0] * row_sp
+        Py = ipp[1] + col * F_row[1] * col_sp + row * F_col[1] * row_sp
+        # Pz: IPP_z plus any out-of-plane component from F_row/F_col
+        # (zero for standard axial scans, non-zero for oblique acquisitions)
+        Pz = ipp[2] + col * F_row[2] * col_sp + row * F_col[2] * row_sp
+        flat.extend([round(Px, 3), round(Py, 3), round(Pz, 3)])
+    return flat
+
+
+def _hex_to_rgb(color: str) -> list[int]:
+    """Convert a '#rrggbb' CSS hex color string to [R, G, B] for ROIDisplayColor."""
+    h = color.lstrip("#")
+    if len(h) == 6:
+        try:
+            return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)]
+        except ValueError:
+            pass
+    return [255, 68, 68]   # fallback red
+
+
+def _ref_image_item(sop_class_uid: str, sop_instance_uid: str) -> pydicom.Dataset:
+    """One ContourImageSequence item — references a single CT slice SOP instance."""
+    item = pydicom.Dataset()
+    item.ReferencedSOPClassUID    = sop_class_uid
+    item.ReferencedSOPInstanceUID = sop_instance_uid
+    return item
+
+
+def _build_rtstruct(rois: list[dict], ct_slices: list[dict]) -> FileDataset:
+    """
+    Build a DICOM RT Structure Set (RTSTRUCT) dataset from drawn ROI polygons.
+
+    ── RTSTRUCT internal structure ───────────────────────────────────────────
+    Three parallel sequences hold different aspects of each ROI:
+
+      StructureSetROISequence      — ROI number and name (no geometry)
+      ROIContourSequence           — 3-D contour geometry per ROI
+        └─ ContourSequence         — one item per planar polygon
+             ContourData           — flat [x,y,z, x,y,z,...] in patient mm
+      RTROIObservationsSequence    — clinical type / label per ROI
+
+    Plus:
+      ReferencedFrameOfReferenceSequence
+        — ties this RTSTRUCT to the CT's coordinate frame and series, so
+          treatment-planning systems can auto-register it against the CT.
+
+    ── Coordinate transform ──────────────────────────────────────────────────
+    See _pixels_to_patient() for the full pixel → patient mm formula.
+    """
+    now = datetime.datetime.now()
+    RT_STRUCT_CLASS = "1.2.840.10008.5.1.4.1.1.481.3"
+
+    # ── File meta ──────────────────────────────────────────────────────────────
+    sop_instance_uid = generate_uid()
+    file_meta = FileMetaDataset()
+    file_meta.MediaStorageSOPClassUID    = RT_STRUCT_CLASS
+    file_meta.MediaStorageSOPInstanceUID = sop_instance_uid
+    file_meta.TransferSyntaxUID          = ExplicitVRLittleEndian
+
+    ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
+    ds.is_implicit_VR   = False
+    ds.is_little_endian = True
+
+    # ── Shared CT metadata — RTSTRUCT lives in the same study as the CT ────────
+    ref = ct_slices[0]
+    frame_ref_uid = ref["frame_ref_uid"]
+    study_uid     = ref["study_uid"]
+    ct_series_uid = ref["series_uid"]
+
+    # ── Patient / study tags ───────────────────────────────────────────────────
+    ds.SpecificCharacterSet       = "ISO_IR 6"
+    ds.InstanceCreationDate       = now.strftime("%Y%m%d")
+    ds.InstanceCreationTime       = now.strftime("%H%M%S")
+    ds.SOPClassUID                = RT_STRUCT_CLASS
+    ds.SOPInstanceUID             = sop_instance_uid
+    ds.Modality                   = "RTSTRUCT"
+    ds.Manufacturer               = ""
+    ds.StudyDate                  = now.strftime("%Y%m%d")
+    ds.StudyTime                  = ""
+    ds.AccessionNumber            = ""
+    ds.StudyDescription           = ""
+    ds.SeriesDescription          = "Drawn ROIs export"
+    ds.PatientName                = "Anonymous"
+    ds.PatientID                  = ""
+    ds.PatientBirthDate           = ""
+    ds.PatientSex                 = ""
+    ds.StudyInstanceUID           = study_uid      # same study as the CT
+    ds.SeriesInstanceUID          = generate_uid() # new series for the RTSTRUCT
+    ds.FrameOfReferenceUID        = frame_ref_uid
+    ds.PositionReferenceIndicator = ""
+    ds.SeriesNumber               = "1"
+    ds.InstanceNumber             = "1"
+    ds.StructureSetLabel          = "Drawn ROIs"
+    ds.StructureSetDate           = now.strftime("%Y%m%d")
+    ds.StructureSetTime           = now.strftime("%H%M%S")
+
+    # ── ReferencedFrameOfReferenceSequence ─────────────────────────────────────
+    # Links the RTSTRUCT to the CT geometry so TPS software can auto-register.
+    # Includes RTReferencedStudySequence → RTReferencedSeriesSequence →
+    # ContourImageSequence (one item per CT slice).
+    contour_images = DicomSequence([
+        _ref_image_item(s["sop_class_uid"], s["sop_instance_uid"])
+        for s in ct_slices
+    ])
+
+    ref_series = pydicom.Dataset()
+    ref_series.SeriesInstanceUID      = ct_series_uid
+    ref_series.ContourImageSequence   = contour_images
+
+    ref_study = pydicom.Dataset()
+    ref_study.ReferencedSOPClassUID    = "1.2.840.10008.3.1.2.3.1"  # Detached Study Mgmt
+    ref_study.ReferencedSOPInstanceUID = study_uid
+    ref_study.RTReferencedSeriesSequence = DicomSequence([ref_series])
+
+    ref_frame = pydicom.Dataset()
+    ref_frame.FrameOfReferenceUID        = frame_ref_uid
+    ref_frame.PositionReferenceIndicator = ""
+    ref_frame.RTReferencedStudySequence  = DicomSequence([ref_study])
+
+    ds.ReferencedFrameOfReferenceSequence = DicomSequence([ref_frame])
+
+    # ── StructureSetROISequence — one item per ROI (name + number only) ────────
+    ss_rois = []
+    for i, roi in enumerate(rois):
+        item = pydicom.Dataset()
+        item.ROINumber                    = i + 1
+        item.ReferencedFrameOfReferenceUID = frame_ref_uid
+        item.ROIName                      = roi.get("name", f"ROI_{i + 1}")
+        item.ROIGenerationAlgorithm       = "MANUAL"
+        ss_rois.append(item)
+    ds.StructureSetROISequence = DicomSequence(ss_rois)
+
+    # ── ROIContourSequence — 3-D geometry for each ROI ─────────────────────────
+    roi_contours = []
+    for i, roi in enumerate(rois):
+        slice_idx = int(roi.get("slice", 0))
+        if slice_idx >= len(ct_slices):
+            # ROI references a slice that isn't in the uploaded CT — skip.
+            continue
+
+        contour_data = _pixels_to_patient(roi.get("points", []), ct_slices[slice_idx])
+        if len(contour_data) < 9:   # need at least 3 points (3 × xyz = 9 floats)
+            continue
+
+        contour = pydicom.Dataset()
+        contour.ContourGeometricType  = "CLOSED_PLANAR"
+        contour.NumberOfContourPoints = len(contour_data) // 3
+        contour.ContourData           = contour_data   # flat [x,y,z, x,y,z, ...]
+
+        roi_contour = pydicom.Dataset()
+        roi_contour.ReferencedROINumber = i + 1
+        roi_contour.ROIDisplayColor     = _hex_to_rgb(roi.get("color", "#ff4444"))
+        roi_contour.ContourSequence     = DicomSequence([contour])
+        roi_contours.append(roi_contour)
+
+    ds.ROIContourSequence = DicomSequence(roi_contours)
+
+    # ── RTROIObservationsSequence — clinical type label per ROI ───────────────
+    observations = []
+    for i, roi in enumerate(rois):
+        obs = pydicom.Dataset()
+        obs.ObservationNumber    = i + 1
+        obs.ReferencedROINumber  = i + 1
+        obs.ROIObservationLabel  = roi.get("name", f"ROI_{i + 1}")
+        obs.RTROIInterpretedType = "ORGAN"  # generic; relabel in TPS as needed
+        obs.ROIInterpreter       = ""
+        observations.append(obs)
+    ds.RTROIObservationsSequence = DicomSequence(observations)
+
+    return ds
+
+
+@app.post("/export-rtstruct")
+async def export_rtstruct(payload: dict = Body(...)):
+    """
+    Convert a saved ROI JSON file into an RT Structure Set DICOM file and
+    return it as a downloadable attachment.
+
+    Body:
+      {
+        "filename":   "roi_<timestamp>.json",  — file in saved_rois/
+        "series_uid": ""                        — optional CT SeriesInstanceUID
+                                                  filter; "" = use any CT/MR
+      }
+
+    Processing steps:
+      1. Load ROI JSON from saved_rois/{filename}
+      2. Load CT slices from uploaded_dicoms/ (sorted by InstanceNumber,
+         matching the frontend's loadSeries() order so slice indices align)
+      3. Convert each ROI polygon from pixel coords → patient mm via the
+         DICOM affine transform (see _pixels_to_patient)
+      4. Build a valid RTSTRUCT dataset with pydicom
+      5. Write to saved_rois/ and return as application/octet-stream
+
+    Response: .dcm file download
+    """
+    filename   = payload.get("filename",   "")
+    series_uid = payload.get("series_uid", "")
+
+    # ── Load ROI record ────────────────────────────────────────────────────────
+    safe_name = os.path.basename(filename)
+    filepath  = os.path.join(ROI_SAVE_DIR, safe_name)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail=f"ROI file not found: {safe_name}")
+
+    with open(filepath) as f:
+        record = json.load(f)
+
+    rois = record.get("rois", [])
+    if not rois:
+        raise HTTPException(status_code=422, detail="No ROIs found in file")
+
+    # ── Load CT slices ─────────────────────────────────────────────────────────
+    ct_slices = _load_ct_for_export(series_uid)
+    if not ct_slices:
+        raise HTTPException(
+            status_code=422,
+            detail="No CT/MR slices found in uploaded_dicoms/ — upload a CT series first",
+        )
+
+    # ── Build RTSTRUCT ─────────────────────────────────────────────────────────
+    try:
+        ds = _build_rtstruct(rois, ct_slices)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RTSTRUCT build error: {e}")
+
+    # ── Write and return ───────────────────────────────────────────────────────
+    out_name = safe_name.replace(".json", "_rtstruct.dcm")
+    out_path = os.path.join(ROI_SAVE_DIR, out_name)
+    ds.save_as(out_path, write_like_original=False)
+
+    return FileResponse(
+        out_path,
+        media_type="application/octet-stream",
+        filename=out_name,
+    )
 
 
 @app.get("/")

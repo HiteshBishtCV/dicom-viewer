@@ -24,12 +24,14 @@
 //
 // ── Public API ────────────────────────────────────────────────────────────────
 //
-//   roiSave.save()               — POST current roiStore to backend
-//                                  Returns Promise<{filename, count}|null>
-//   roiSave.loadList()           — GET list of saved files from backend
-//                                  Returns Promise<string[]>
-//   roiSave.load(filename)       — GET one saved file; returns the full record
-//                                  Returns Promise<{rois, saved_at, ...}|null>
+//   roiSave.save()                     — POST current roiStore to backend
+//                                        Returns Promise<{filename, count}|null>
+//   roiSave.loadList()                 — GET list of saved files from backend
+//                                        Returns Promise<string[]>
+//   roiSave.load(filename)             — GET one saved file; returns the full record
+//                                        Returns Promise<{rois, saved_at, ...}|null>
+//   roiSave.exportRtstruct(filename)   — POST /export-rtstruct; triggers .dcm download
+//                                        Returns Promise<boolean> (true = success)
 
 const roiSave = (() => {
 
@@ -114,6 +116,48 @@ const roiSave = (() => {
     }
   }
 
-  return { save, loadList, load };
+  // ── Export RTSTRUCT ────────────────────────────────────────────────────────
+
+  /**
+   * POST /export-rtstruct with the given saved-ROI filename.
+   * The backend converts pixel coords → patient mm, builds an RTSTRUCT DICOM,
+   * and returns it as a binary blob which is immediately triggered as a
+   * browser download.
+   *
+   * seriesUid is optional — pass "" to let the backend use whatever CT/MR
+   * is currently in uploaded_dicoms/.
+   *
+   * Returns true on success, false on failure.
+   */
+  async function exportRtstruct(filename, seriesUid = '') {
+    try {
+      const res = await fetch(`${API}/export-rtstruct`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ filename, series_uid: seriesUid }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail ?? `HTTP ${res.status}`);
+      }
+
+      // Trigger a file-save dialog in the browser using a temporary object URL.
+      const blob     = await res.blob();
+      const url      = URL.createObjectURL(blob);
+      const anchor   = document.createElement('a');
+      anchor.href     = url;
+      anchor.download = filename.replace('.json', '_rtstruct.dcm');
+      anchor.click();
+      URL.revokeObjectURL(url);
+
+      return true;
+    } catch (err) {
+      alert(`RTSTRUCT export failed: ${err.message}`);
+      return false;
+    }
+  }
+
+  return { save, loadList, load, exportRtstruct };
 
 })();
