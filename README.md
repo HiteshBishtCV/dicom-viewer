@@ -330,6 +330,49 @@ RTSTRUCT dataset
 - `frontend/roi-save.js`: `roiSave.save()` POSTs full `roiStore` payload; `loadList()` / `load(filename)` for retrieval
 - "↑ Save ROIs" button added to Structures panel
 
+### Auto-Segmentation (Lung + Heart)
+
+CPU-only automatic contouring from CT in the MPR view. No GPU, no model downloads.
+
+**Install once:**
+```bash
+cd backend && source venv/bin/activate
+pip install numpy scipy scikit-image
+```
+
+#### Lung segmentation (seed-point)
+
+1. Click **🫁 Segment Lungs** — a status bar prompts "Click inside the LEFT lung"
+2. Click inside the left lung on the axial canvas (any slice)
+3. Status updates to "Click inside the RIGHT lung" → click inside it
+4. Backend segments both lungs separately and returns one contour per slice
+
+Algorithm:
+- Threshold CT at −300 HU (air-filled voxels)
+- Remove external air by zeroing components that touch the volume boundary
+- 3D seed-based region growing selects the component under each seed point (naturally excludes trachea/bronchi)
+- 3D morphological closing with **15 mm physical radius** fills lung nodules (bright ~−100 to +100 HU spots) by expanding then re-shrinking the mask
+- `scipy.ndimage.binary_fill_holes` removes any remaining interior holes
+
+#### Heart segmentation (automatic)
+
+Click **❤ Segment Heart** — no seed point needed.
+
+Algorithm:
+- Auto-locates lungs internally using a dark-voxel centroid seed heuristic
+- Builds a per-slice **mediastinum mask** (column band between the two lung boundaries)
+- Thresholds 0–120 HU inside the mediastinum, excluding lung voxels
+- Selects the largest connected component
+- 12 mm morphological closing + per-slice hole fill (fills cardiac chambers on non-contrast CT)
+- Note: may include aortic root / pulmonary vessels — edit contours manually if needed
+
+#### Output
+
+- Contours appear immediately on the axial MPR canvas across all slices
+- Left Lung (cyan), Right Lung (green), Heart (red)
+- Results are standard ROIs: editable, saveable, exportable as RTSTRUCT
+- RTSTRUCT export groups all same-named contours into one RT structure
+
 ### Contour interpolation for 3D structures
 
 Draw axial ROIs at 2 or more Z slices with the same name (key frames), then click **⟷ Interpolate** to fill every intermediate slice automatically.
