@@ -1,9 +1,11 @@
-from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydicom.dataset import FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 import pydicom
+import datetime
+import json
 import math
 import os
 
@@ -17,8 +19,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = "uploaded_dicoms"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+UPLOAD_DIR   = "uploaded_dicoms"
+ROI_SAVE_DIR = "saved_rois"
+os.makedirs(UPLOAD_DIR,   exist_ok=True)
+os.makedirs(ROI_SAVE_DIR, exist_ok=True)
 
 app.mount("/files", StaticFiles(directory="."), name="files")
 
@@ -534,6 +538,78 @@ def get_rtstruct_slices(path: str):
             })
 
     return {"slices": slices, "ct": data["ct"]}
+
+
+# ── ROI persistence ───────────────────────────────────────────────────────────
+
+@app.post("/save-roi")
+async def save_roi(payload: dict = Body(...)):
+    """
+    Persist a list of drawn ROIs to disk as JSON.
+
+    Expected body:
+      { "rois": [ { "id", "name", "slice", "points", "color", "source" }, ... ] }
+
+    Each ROI must include at minimum: name (str), slice (int), points ([[x,y],...]).
+    Extra fields are accepted and stored unchanged.
+
+    Returns: { "status": "ok", "filename": "roi_<timestamp>.json", "count": N }
+    """
+    rois = payload.get("rois")
+    if not isinstance(rois, list):
+        raise HTTPException(status_code=422, detail="Body must contain a 'rois' list")
+
+    for i, r in enumerate(rois):
+        if "name"   not in r: raise HTTPException(422, f"ROI[{i}] missing 'name'")
+        if "slice"  not in r: raise HTTPException(422, f"ROI[{i}] missing 'slice'")
+        if "points" not in r: raise HTTPException(422, f"ROI[{i}] missing 'points'")
+
+    timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    filename  = f"roi_{timestamp}.json"
+    filepath  = os.path.join(ROI_SAVE_DIR, filename)
+
+    record = {
+        "saved_at": timestamp,
+        "roi_count": len(rois),
+        "rois": rois,
+    }
+
+    with open(filepath, "w") as f:
+        json.dump(record, f, indent=2)
+
+    return {"status": "ok", "filename": filename, "count": len(rois)}
+
+
+@app.get("/load-roi/")
+def list_roi_files():
+    """
+    Return a list of all saved ROI filenames, newest first.
+
+    Response: { "files": ["roi_20260404_123456_000001.json", ...] }
+    """
+    files = sorted(
+        (f for f in os.listdir(ROI_SAVE_DIR) if f.endswith(".json")),
+        reverse=True,
+    )
+    return {"files": files}
+
+
+@app.get("/load-roi/{filename}")
+def load_roi(filename: str):
+    """
+    Load a previously saved ROI JSON file by name.
+
+    Path param:
+      filename — exact filename returned by POST /save-roi or GET /load-roi/
+
+    Response: the full saved record including 'saved_at', 'roi_count', 'rois'.
+    """
+    safe_name = os.path.basename(filename)          # prevent path traversal
+    filepath  = os.path.join(ROI_SAVE_DIR, safe_name)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail=f"Not found: {safe_name}")
+    with open(filepath) as f:
+        return json.load(f)
 
 
 @app.get("/")

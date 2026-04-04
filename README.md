@@ -47,6 +47,23 @@ firefox frontend/index.html
 
 ---
 
+### ROI Save / Load (JSON)
+
+Drawn ROIs can be persisted to the backend with one click.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/save-roi` | POST | Accept `{ rois: [{name, slice, points, ...}] }`, write `saved_rois/roi_<timestamp>.json` |
+| `/load-roi/` | GET | List all saved ROI files (newest first) |
+| `/load-roi/{filename}` | GET | Return the full saved record |
+
+- **"↑ Save ROIs" button** in the Structures panel sends all entries from `roiStore` to the backend in one POST
+- Each saved file is self-contained JSON — no DICOM dependency
+- `roi-save.js` is fully decoupled: it reads from `roiStore` only, so ROIs from any drawing tool are included automatically
+- DICOM RTSTRUCT export is a separate future step — not included here
+
+---
+
 ### Polygon ROI Drawing
 
 Available in both the 2D viewer and MPR view.
@@ -219,13 +236,25 @@ dicom-viewer/
 │   ├── vol-tab-init.js        # 3D volume tab bootstrap
 │   ├── drr-render.js          # GPU DRR renderer (Beer-Lambert ray-sum)
 │   ├── drr-tab.html           # Standalone DRR tab layout
-│   └── drr-tab-init.js        # DRR tab bootstrap
+│   ├── drr-tab-init.js        # DRR tab bootstrap
+│   ├── roi-store.js           # Global ROI store (canonical [[x,y]] format)
+│   ├── roi-draw.js            # 2D viewer polygon ROI drawing
+│   ├── mpr-roi.js             # MPR polygon ROI drawing (all 3 planes)
+│   ├── roi-save.js            # ROI → backend JSON persistence
+│   └── rtstruct-overlay.js    # RTSTRUCT contour overlay
+├── backend/
+│   └── saved_rois/            # Saved ROI JSON files (auto-created)
 └── Patient_data/              # Sample patient data (not committed)
 ```
 
 ---
 
 ## Changelog
+
+### ROI save / load
+- `backend/server.py`: `POST /save-roi`, `GET /load-roi/`, `GET /load-roi/{filename}` — JSON file storage in `saved_rois/`
+- `frontend/roi-save.js`: `roiSave.save()` POSTs full `roiStore` payload; `loadList()` / `load(filename)` for future retrieval
+- "↑ Save ROIs" button added to Structures panel
 
 ### ROI naming
 - `roi-draw.js`, `mpr-roi.js`: `window.prompt()` after polygon close; default `ROI_N` accepted on cancel or blank

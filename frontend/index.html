@@ -223,6 +223,12 @@
       <div class="sp-section">
         <div class="sp-hdr">Drawn ROIs</div>
         <button id="roiDrawBtn" onclick="toggleRoiDraw()">✏ Draw ROI</button>
+        <button id="roiSaveBtn" onclick="roiSave.save()"
+                style="padding:5px 0;border-radius:4px;cursor:pointer;font-size:12px;
+                       font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;width:100%;"
+                title="Save all drawn ROIs to backend (JSON)">
+          ↑ Save ROIs
+        </button>
         <div id="drawnRoiList">
           <div class="sp-empty">No ROIs drawn</div>
         </div>
@@ -293,6 +299,7 @@
   <script src="roi-store.js"></script>
   <script src="roi-draw.js"></script>
   <script src="mpr-roi.js"></script>
+  <script src="roi-save.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
