@@ -1980,20 +1980,28 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
 
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
+                in_path  = os.path.join(tmpdir, "ct.nii.gz")
+                out_dir  = pathlib.Path(tmpdir) / "seg_out"
+                out_dir.mkdir()
+
+                # Save CT as NIfTI — newer TotalSegmentator versions require a
+                # file path rather than a SimpleITK Image object.
+                sitk.WriteImage(ct_img, in_path)
+
                 ts_run(
-                    ct_img,
-                    pathlib.Path(tmpdir),
+                    pathlib.Path(in_path),
+                    out_dir,
                     fast=fast,
                     task="total",
                     quiet=True,
                     device=device,
                 )
-                seg_path = os.path.join(tmpdir, "segmentation.nii.gz")
+                seg_path = str(out_dir / "segmentation.nii.gz")
                 if not os.path.exists(seg_path):
-                    nii_files = [f for f in os.listdir(tmpdir) if f.endswith(".nii.gz")]
+                    nii_files = [f for f in os.listdir(out_dir) if f.endswith(".nii.gz")]
                     if not nii_files:
                         raise RuntimeError("TotalSegmentator produced no output file.")
-                    seg_path = os.path.join(tmpdir, nii_files[0])
+                    seg_path = str(out_dir / nii_files[0])
                 seg_img = sitk.ReadImage(seg_path)
                 seg_arr = sitk.GetArrayFromImage(seg_img)   # (nz, nr, nc)
         finally:
