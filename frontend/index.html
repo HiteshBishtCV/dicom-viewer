@@ -41,8 +41,18 @@
     #presets button:hover { background: #3a3a3a; color: #fff; }
 
     #rtLegend {
-      display: none; flex-wrap: wrap; gap: 4px; width: 512px;
+      display: none; flex-direction: column; gap: 3px; width: 512px;
       padding: 6px 0; border-top: 1px solid #333; margin-top: 2px;
+      max-height: 180px; overflow-y: auto;
+    }
+    #rtLegend label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: #ccc; cursor: pointer; user-select: none;
+    }
+    #rtLegend input[type=checkbox] { cursor: pointer; flex-shrink: 0; }
+    #rtLegend input[type=color] {
+      width: 22px; height: 16px; padding: 1px; border: 1px solid #555;
+      border-radius: 2px; cursor: pointer; background: none; flex-shrink: 0;
     }
 
     #mprBtnGroup {

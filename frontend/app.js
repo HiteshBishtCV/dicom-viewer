@@ -443,19 +443,8 @@ function activateRtstruct(series) {
     });
 }
 
-function updateRtLegend() {
-  const el = document.getElementById('rtLegend');
-  if (!el) return;
-  const items = getRoiLegend();
-  if (!items.length) { el.style.display = 'none'; return; }
-  el.style.display = 'flex';
-  el.innerHTML = items.map(({ name, color }) =>
-    `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;">
-      <span style="width:12px;height:12px;background:${color};border-radius:2px;flex-shrink:0;display:inline-block;"></span>
-      <span style="font-size:12px;color:#ccc">${name}</span>
-    </span>`
-  ).join('');
-}
+// updateRtLegend() is defined in rtstruct-overlay.js (needs direct access to
+// _roiColor and _roiHidden to wire up the color picker and checkbox handlers).
 
 function openMPRTab(mode) {
   const tab = window.open(`mpr-tab.html?mode=${mode}`, '_blank');
