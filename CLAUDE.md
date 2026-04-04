@@ -75,7 +75,9 @@ pip install fastapi uvicorn pydicom python-multipart
 - RTSTRUCT export: `POST /export-rtstruct`; uses `_roi_contour_data()` which is plane-aware (axial/coronal/sagittal); `_pixels_to_patient` handles axial, `_roi_contour_data` handles MPR flips
 - MPR plane → CT voxel: axial `(ix,iy,z)`, coronal `(ncols-1-ix, planeIndex, iy)`, sagittal `(planeIndex, nrows-1-ix, iy)` — flips match renderCoronal/renderSagittal in `mpr.js`
 - `_load_ct_for_export` now includes `rows` and `cols` per slice (needed for coronal/sagittal flip math)
-- `mpr-roi.js`: full edit mode (select, vertex drag, Delete key), `importRois()`, `roiStore` sync on every close/delete/import; `_drawCrossViewIndicators()` draws a thin dashed guide line in each non-source canvas at the ROI's planeIndex; `_requestRedraw()` routes all interactive redraws through `updateAllViews()` to prevent rubber-band accumulation
+- `mpr-roi.js`: full edit mode (select, vertex drag, Delete key), `importRois()`, `roiStore` sync on every close/delete/import; `_drawCrossViewIndicators()` draws a thin dashed guide line in each non-source canvas at the ROI's planeIndex; `_requestRedraw()` routes all interactive redraws through `updateAllViews()` to prevent rubber-band accumulation; interpolation engine: `interpolate(name)`, `clearInterpolated(name)`, `getInterpolatable()` — arc-length resample → start-point align → linear blend per z-slice; interpolated ROIs carry `isInterpolated:true` and render dashed
+- `roi-save.js`: save payload now forwards `plane`, `planeIndex`, `canvasId`, `isInterpolated` for full round-trip fidelity
+- `backend/server.py` `_build_rtstruct()`: groups ROIs by name — one `StructureSetROISequence`/`ROIContourSequence` per unique name, multiple `ContourSequence` items inside (one per slice); backwards-compatible with single-slice ROIs
 - `mpr-tab.html`: loads `roi-store.js` + `roi-save.js`; Draw/Edit/Save/Load/Export buttons + two file `<select>` pickers
 - `mpr-tab-init.js`: `toggleMprEdit`, `showMprLoadPicker`, `loadSelectedMprRoi`, `showMprExportPicker`, `exportSelectedMprRoi`; stores `_mprSeriesUid` from postMessage payload
 

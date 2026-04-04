@@ -330,6 +330,20 @@ RTSTRUCT dataset
 - `frontend/roi-save.js`: `roiSave.save()` POSTs full `roiStore` payload; `loadList()` / `load(filename)` for retrieval
 - "↑ Save ROIs" button added to Structures panel
 
+### Contour interpolation for 3D structures
+
+Draw axial ROIs at 2 or more Z slices with the same name (key frames), then click **⟷ Interpolate** to fill every intermediate slice automatically.
+
+- **Arc-length resampling** — each key-frame polygon is resampled to 64 uniformly-spaced points regardless of original vertex count
+- **Start-point alignment** — the second contour's starting index is rotated to minimise sum-of-squared distances to the first, preventing twisted paths
+- **Linear blending** — each intermediate slice at z is: `t = (z - z_A) / (z_B - z_A)`, then `pt[i] = (1-t)·A[i] + t·B[i]`
+- Works between each consecutive pair of key frames (3 key frames = 2 interpolated segments)
+- Interpolated contours rendered dashed + semi-transparent to distinguish from hand-drawn key frames
+- **✕ Clear Interp** removes generated contours while keeping key frames
+- Interpolation is idempotent — clicking ⟷ Interpolate again re-runs cleanly
+- Save → Load round-trips correctly (`isInterpolated` field preserved in JSON)
+- RTSTRUCT export: all contours sharing the same name are grouped into **one RT structure** with one `ContourSequence` item per slice (correct DICOM representation for a 3D structure suitable for boolean operations in a TPS)
+
 ### MPR cross-view ROI indicators + rubber-band fix
 - `mpr-roi.js`: `_drawCrossViewIndicators()` paints a thin dashed coloured guide line in each non-source canvas at the plane position of every ROI drawn in the other two planes (e.g., an axial ROI at z=N appears as a horizontal line at iy=N in both coronal and sagittal)
 - The indicator line carries the ROI name tag so multiple overlapping ROIs are distinguishable
