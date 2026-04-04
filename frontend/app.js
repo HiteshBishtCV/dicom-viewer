@@ -25,12 +25,16 @@ cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
 cornerstoneTools.external.Hammer = Hammer;
 cornerstoneTools.init();
 
-// Draw R / L labels after every Cornerstone render (survives W/L drag redraws)
+// Draw R / L labels and RTSTRUCT contours after every Cornerstone render.
+// This handler fires after W/L drag, zoom, pan, and slice change — so both
+// the labels and contours are always aligned with the current viewport state.
 element.addEventListener('cornerstoneimagerendered', function() {
   const canvas = element.querySelector('canvas');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
+
+  // R / L orientation labels
   ctx.font         = 'bold 18px sans-serif';
   ctx.fillStyle    = '#ffff00';
   ctx.shadowColor  = '#000';
@@ -41,6 +45,10 @@ element.addEventListener('cornerstoneimagerendered', function() {
   ctx.textAlign    = 'right';
   ctx.fillText('L', w - 8, h / 2);
   ctx.shadowBlur   = 0;
+
+  // RTSTRUCT contour overlay — currentIndex matches backend slice_index for
+  // standard axial CT (both ordered ascending by InstanceNumber / z-position).
+  drawRtstructOverlay(element, currentIndex);
 });
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -220,6 +228,8 @@ function showSeries(seriesData) {
 
     if (series.type === 'image' || series.type === 'multiframe') {
       btn.onclick = () => { setActiveBtn(btn); loadSeries(series); };
+    } else if (series.type === 'struct') {
+      btn.onclick = () => { setActiveBtn(btn); activateRtstruct(series); };
     } else {
       btn.onclick = () => { setActiveBtn(btn); showMetadata(series); };
     }
@@ -242,6 +252,11 @@ function loadSeries(series) {
   metaPanel.style.display  = 'block';
   infoPanel.style.display  = 'none';
   document.getElementById('presets').style.display = 'flex';
+
+  // Clear any previously loaded RTSTRUCT so stale contours from a prior series
+  // don't appear on the new CT.  The user must re-click the RTSTRUCT button.
+  clearRtstruct();
+  updateRtLegend();
 
   currentImageIds = series.instances.map(item => {
     const base = `wadouri:http://127.0.0.1:8000/files/${item.path}`;
@@ -401,6 +416,45 @@ function openDRRTab() {
     }, '*');
   }
   window.addEventListener('message', onReady);
+}
+
+// ── RTSTRUCT overlay ──────────────────────────────────────────────────────────
+
+function activateRtstruct(series) {
+  const path = series.metadata.path;
+  loadRtstruct(path)
+    .then(() => {
+      updateRtLegend();
+      // Re-render the current slice so the overlay is drawn immediately.
+      // If no CT is loaded yet, show a prompt in infoPanel instead.
+      if (currentImageIds.length) {
+        displayImage(currentIndex);
+      } else {
+        infoPanel.style.display = 'block';
+        infoPanel.innerHTML =
+          '<p style="color:#aaa;padding:8px">Load a CT series first to see contour overlay.</p>';
+      }
+    })
+    .catch(err => {
+      console.error('RTSTRUCT load failed:', err);
+      infoPanel.style.display = 'block';
+      infoPanel.innerHTML =
+        `<p style="color:#f88;padding:8px">Failed to load RTSTRUCT: ${err.message}</p>`;
+    });
+}
+
+function updateRtLegend() {
+  const el = document.getElementById('rtLegend');
+  if (!el) return;
+  const items = getRoiLegend();
+  if (!items.length) { el.style.display = 'none'; return; }
+  el.style.display = 'flex';
+  el.innerHTML = items.map(({ name, color }) =>
+    `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;">
+      <span style="width:12px;height:12px;background:${color};border-radius:2px;flex-shrink:0;display:inline-block;"></span>
+      <span style="font-size:12px;color:#ccc">${name}</span>
+    </span>`
+  ).join('');
 }
 
 function openMPRTab(mode) {

@@ -40,6 +40,11 @@
     }
     #presets button:hover { background: #3a3a3a; color: #fff; }
 
+    #rtLegend {
+      display: none; flex-wrap: wrap; gap: 4px; width: 512px;
+      padding: 6px 0; border-top: 1px solid #333; margin-top: 2px;
+    }
+
     #mprBtnGroup {
       display: none; width: 512px; gap: 6px;
     }
@@ -137,6 +142,7 @@
       <div id="dicomImage"></div>
       <input type="range" id="sliceSlider" min="0" max="0" value="0">
       <div id="sliceLabel">—</div>
+      <div id="rtLegend"></div>
       <div id="presets" style="display:none;">
         <button onclick="applyPreset(-600,1600)">Lung</button>
         <button onclick="applyPreset(400,1800)">Bone</button>
@@ -207,6 +213,7 @@
   <script src="gpu-volume.js"></script>
   <script src="gpu-slice.js"></script>
   <script src="mpr.js"></script>
+  <script src="rtstruct-overlay.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
