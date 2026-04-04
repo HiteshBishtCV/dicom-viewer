@@ -75,7 +75,7 @@ Available in both the 2D viewer and MPR view.
 - **Structures panel** — lists all ROIs with an inline rename input, slice/plane position, and a delete button
 - Points stored in image-pixel coordinates and re-projected each frame so ROIs stay aligned through zoom and pan
 
-#### Edit mode
+#### Edit mode (2D viewer and MPR)
 
 - **"✎ Edit ROI" button** — activates edit mode (mutually exclusive with draw mode)
 - **Click inside a polygon** — selects it; selected ROI shows a white dashed ring and larger vertex handles
@@ -84,12 +84,22 @@ Available in both the 2D viewer and MPR view.
 - **Click empty space** — deselects
 - Changing slice clears selection; drag commit fires on mouse-leave too (no lost edits)
 
-#### Load from backend
+#### Load from backend (2D viewer and MPR)
 
 - **"↓ Load ROIs" button** — fetches saved file list from `GET /load-roi/`, shows an inline `<select>`
-- Selecting a file calls `GET /load-roi/{filename}` and imports ROIs via `roiDraw.importRois()`
+- Selecting a file calls `GET /load-roi/{filename}` and imports ROIs; entries with `canvasId` go to MPR, others to the 2D viewer
 - Deduplicates by `id` so re-loading the same file is safe
 - Loaded ROIs render on the correct slice immediately and persist through scroll/zoom
+
+#### MPR-specific coordinate mapping for RTSTRUCT export
+
+| Plane | ix → CT col | iy → CT row | planeIndex → |
+|---|---|---|---|
+| Axial | `ix` | `iy` | CT slice `z` |
+| Coronal | `ncols-1-ix` (flip) | `planeIndex` (fixed row) | — |
+| Sagittal | `planeIndex` (fixed col) | `nrows-1-ix` (flip) | — |
+
+For coronal/sagittal ROIs, `iy` encodes the CT slice index — each polygon vertex may lie on a different slice, which is valid for a `CLOSED_PLANAR` DICOM contour in a non-axial plane.
 
 ---
 

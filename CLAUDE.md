@@ -72,10 +72,12 @@ pip install fastapi uvicorn pydicom python-multipart
 - ROI edit mode (`roi-draw.js`): `toggleEditMode()` / `isEditing()`; click-to-select (point-in-polygon), vertex drag (mousedown→mousemove→mouseup), Delete key deletes selected; modes are mutually exclusive
 - ROI load (`roi-draw.js`): `importRois(array)` converts `[[x,y]]` → `{x,y}`, deduplicates by id, syncs roiStore, redraws — aligned to CT because points are already in image-pixel coords
 - Glue code for load UI lives in `app.js` (`showRoiLoadPicker`, `loadSelectedRoi`, `toggleRoiEdit`); `roi-save.js` stays pure I/O
-- RTSTRUCT export: `POST /export-rtstruct` in `server.py`; accepts `{filename, series_uid}`; uses `_load_ct_for_export` + `_pixels_to_patient` + `_build_rtstruct`; returns .dcm FileResponse
-- Coordinate transform: `P = IPP + col×F_row×ΔC + row×F_col×ΔR`; slice index matches frontend InstanceNumber-ascending sort
-- `roi-save.js` `exportRtstruct(filename)`: POSTs to `/export-rtstruct`, downloads blob via object URL
-- `app.js` stores `window._activeSeriesUid` (CT SeriesInstanceUID) on series load for the export picker
+- RTSTRUCT export: `POST /export-rtstruct`; uses `_roi_contour_data()` which is plane-aware (axial/coronal/sagittal); `_pixels_to_patient` handles axial, `_roi_contour_data` handles MPR flips
+- MPR plane → CT voxel: axial `(ix,iy,z)`, coronal `(ncols-1-ix, planeIndex, iy)`, sagittal `(planeIndex, nrows-1-ix, iy)` — flips match renderCoronal/renderSagittal in `mpr.js`
+- `_load_ct_for_export` now includes `rows` and `cols` per slice (needed for coronal/sagittal flip math)
+- `mpr-roi.js`: full edit mode (select, vertex drag, Delete key), `importRois()`, `roiStore` sync on every close/delete/import
+- `mpr-tab.html`: loads `roi-store.js` + `roi-save.js`; Draw/Edit/Save/Load/Export buttons + two file `<select>` pickers
+- `mpr-tab-init.js`: `toggleMprEdit`, `showMprLoadPicker`, `loadSelectedMprRoi`, `showMprExportPicker`, `exportSelectedMprRoi`; stores `_mprSeriesUid` from postMessage payload
 
 ## GPU Rendering Notes
 

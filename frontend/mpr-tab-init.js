@@ -61,14 +61,14 @@
 
     const { imageIds, series, wc, ww } = e.data;
 
-    // Hide the waiting overlay; showMPRView will show #mprSection and the
-    // progress bar as it builds the volume.
+    // Store the CT series UID for RTSTRUCT export.
+    window._mprSeriesUid = series && series.uid ? series.uid : '';
+
     document.getElementById('mprTabWaiting').style.display = 'none';
 
-    // showMPRView is defined in mpr.js (loaded via <script> tag above).
     await showMPRView(series, imageIds, wc, ww);
 
-    // Attach ROI drawing listeners now that canvases are sized and rendered.
+    // Attach ROI drawing + editing listeners now that canvases exist.
     if (typeof mprRoi !== 'undefined') mprRoi.init();
   });
 
@@ -84,3 +84,91 @@
   }
 
 })();
+
+// ── MPR ROI glue functions ────────────────────────────────────────────────────
+// These live outside the IIFE so they are accessible from inline onclick attrs.
+
+function toggleMprEdit() {
+  const active = mprRoi.toggleEditMode();
+  const btn = document.getElementById('mprRoiEditBtn');
+  if (btn) {
+    btn.textContent       = active ? '◼ Stop Editing' : '✎ Edit ROI';
+    btn.style.color       = active ? '#80cbc4' : '#ccc';
+    btn.style.borderColor = active ? '#4db6ac' : '#444';
+  }
+  // Reset draw button label if edit mode forced draw off.
+  if (active) {
+    const drawBtn = document.getElementById('mprRoiDrawBtn');
+    if (drawBtn) {
+      drawBtn.textContent       = '✏ Draw ROI';
+      drawBtn.style.color       = '#ccc';
+      drawBtn.style.borderColor = '#444';
+    }
+  }
+}
+
+async function showMprLoadPicker() {
+  const select = document.getElementById('mprRoiFileSelect');
+  const files  = await roiSave.loadList();
+
+  if (!files.length) {
+    alert('No saved ROI files found.\nSave your ROIs first using "↑ Save ROIs".');
+    return;
+  }
+
+  select.innerHTML =
+    '<option value="">— select file to load —</option>' +
+    files.map(f => `<option value="${f}">${f}</option>`).join('');
+
+  // Toggle visibility.
+  select.style.display = select.style.display === 'none' ? 'block' : 'none';
+  // Hide export picker if open.
+  const exp = document.getElementById('mprRoiExportSelect');
+  if (exp) exp.style.display = 'none';
+}
+
+async function loadSelectedMprRoi() {
+  const select   = document.getElementById('mprRoiFileSelect');
+  const filename = select.value;
+  if (!filename) return;
+
+  const record = await roiSave.load(filename);
+  if (!record || !Array.isArray(record.rois)) {
+    alert('Failed to load ROI file.');
+    return;
+  }
+
+  // importRois filters to MPR-sourced entries (those with canvasId set).
+  mprRoi.importRois(record.rois);
+  select.style.display = 'none';
+  select.value         = '';
+}
+
+async function showMprExportPicker() {
+  const select = document.getElementById('mprRoiExportSelect');
+  const files  = await roiSave.loadList();
+
+  if (!files.length) {
+    alert('No saved ROI files found.\nSave your ROIs first using "↑ Save ROIs".');
+    return;
+  }
+
+  select.innerHTML =
+    '<option value="">— select file to export —</option>' +
+    files.map(f => `<option value="${f}">${f}</option>`).join('');
+
+  select.style.display = select.style.display === 'none' ? 'block' : 'none';
+  // Hide load picker if open.
+  const load = document.getElementById('mprRoiFileSelect');
+  if (load) load.style.display = 'none';
+}
+
+async function exportSelectedMprRoi() {
+  const select   = document.getElementById('mprRoiExportSelect');
+  const filename = select.value;
+  if (!filename) return;
+
+  await roiSave.exportRtstruct(filename, window._mprSeriesUid ?? '');
+  select.style.display = 'none';
+  select.value         = '';
+}

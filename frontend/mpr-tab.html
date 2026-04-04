@@ -92,14 +92,36 @@
         <button onclick="applyMPRPreset(40,400)">Soft Tissue</button>
         <button onclick="applyMPRPreset(600,2800)">Brain</button>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span id="mprModeIndicator" style="font-size:12px;color:#aaa;">↕ Scroll mode &nbsp;(middle-click to switch)</span>
         <button onclick="resetMPRZoom()">⊠ Reset Zoom</button>
-        <button id="mprRoiDrawBtn"
-          onclick="mprRoi.toggleDrawMode()"
+        <button id="mprRoiDrawBtn" onclick="mprRoi.toggleDrawMode()"
           style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
                  font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;">
           ✏ Draw ROI
+        </button>
+        <button id="mprRoiEditBtn" onclick="toggleMprEdit()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;">
+          ✎ Edit ROI
+        </button>
+        <button onclick="roiSave.save()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;"
+          title="Save all ROIs to backend (JSON)">
+          ↑ Save ROIs
+        </button>
+        <button onclick="showMprLoadPicker()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;"
+          title="Load previously saved ROIs from backend">
+          ↓ Load ROIs
+        </button>
+        <button onclick="showMprExportPicker()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;"
+          title="Export ROIs as RTSTRUCT DICOM (.dcm)">
+          ⬇ RTSTRUCT
         </button>
       </div>
     </div>
@@ -126,10 +148,23 @@
       </div>
     </div>
 
-    <!-- ROI list below the three-pane grid -->
+    <!-- ROI list + file pickers below the three-pane grid -->
     <div id="mprRoiPanel" style="margin-top:12px;">
       <div style="font-size:10px;font-weight:700;color:#666;letter-spacing:0.8px;
                   text-transform:uppercase;margin-bottom:6px;">Drawn ROIs</div>
+      <!-- File pickers — hidden until their button is clicked -->
+      <select id="mprRoiFileSelect" onchange="loadSelectedMprRoi()"
+              style="display:none;width:320px;background:#1a1a1a;color:#ccc;
+                     border:1px solid #444;border-radius:3px;padding:3px;
+                     font-size:11px;margin-bottom:6px;">
+        <option value="">— select file to load —</option>
+      </select>
+      <select id="mprRoiExportSelect" onchange="exportSelectedMprRoi()"
+              style="display:none;width:320px;background:#1a1a1a;color:#ccc;
+                     border:1px solid #444;border-radius:3px;padding:3px;
+                     font-size:11px;margin-bottom:6px;">
+        <option value="">— select file to export —</option>
+      </select>
       <div id="mprRoiList">
         <div style="color:#555;font-size:12px;">No ROIs drawn</div>
       </div>
@@ -137,6 +172,8 @@
 
   </div>
 
+  <script src="roi-store.js"></script>
+  <script src="roi-save.js"></script>
   <script src="mpr.js"></script>
   <script src="mpr-roi.js"></script>
   <script src="mpr-tab-init.js"></script>

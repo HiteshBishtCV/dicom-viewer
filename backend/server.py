@@ -652,6 +652,8 @@ def _load_ct_for_export(series_uid: str = "") -> list[dict]:
                 "ipp":              ipp,
                 "iop":              iop,
                 "ps":               ps,
+                "rows":             int(getattr(ds, "Rows",              0)),
+                "cols":             int(getattr(ds, "Columns",           0)),
                 "instance":         int(getattr(ds, "InstanceNumber",    0)),
                 "frame_ref_uid":    str(getattr(ds, "FrameOfReferenceUID", generate_uid())),
                 "study_uid":        str(getattr(ds, "StudyInstanceUID",    generate_uid())),
@@ -723,6 +725,77 @@ def _ref_image_item(sop_class_uid: str, sop_instance_uid: str) -> pydicom.Datase
     item.ReferencedSOPClassUID    = sop_class_uid
     item.ReferencedSOPInstanceUID = sop_instance_uid
     return item
+
+
+def _roi_contour_data(roi: dict, ct_slices: list[dict]) -> list[float]:
+    """
+    Convert one ROI's polygon to a flat [x,y,z,...] patient-mm ContourData list.
+
+    Handles both coordinate origins:
+
+    ── 2D viewer  (source = 'draw2d') or axial MPR ──────────────────────────
+      points = [[col, row], ...]  at  slice_idx = roi["slice"]
+      All points share the same CT slice → single _pixels_to_patient call.
+
+    ── MPR coronal  (plane = 'coronal') ─────────────────────────────────────
+      The coronal canvas is rendered with a horizontal flip:
+        data[dstRow + (ncols-1-c)] = buf[srcRow + c]
+      So canvas ix = ncols-1-col  ↔  col = ncols-1-ix
+
+      Mapping from canvas (ix, iy) at planeIndex = CT row y:
+        col = ncols - 1 - ix
+        row = planeIndex
+        z   = iy               (iy is the CT slice index in the coronal view)
+
+    ── MPR sagittal  (plane = 'sagittal') ───────────────────────────────────
+      The sagittal canvas is rendered with a horizontal flip:
+        data[dstRow + (nrows-1-r)] = buf[... + r*cols + x]
+      So canvas ix = nrows-1-row  ↔  row = nrows-1-ix
+
+      Mapping from canvas (ix, iy) at planeIndex = CT col x:
+        col = planeIndex
+        row = nrows - 1 - ix
+        z   = iy               (iy is the CT slice index in the sagittal view)
+
+    Each coronal/sagittal point may reference a different CT slice (different z),
+    so each point gets its own _pixels_to_patient call with the appropriate slice.
+    """
+    plane      = roi.get("plane",       "axial")
+    source     = roi.get("source",      "draw2d")
+    points     = roi.get("points",      [])
+    plane_idx  = int(roi.get("planeIndex", roi.get("slice", 0)))
+
+    if not ct_slices or not points:
+        return []
+
+    ncols = ct_slices[0].get("cols", 512)
+    nrows = ct_slices[0].get("rows", 512)
+
+    # ── Axial (2D viewer or MPR axial) ────────────────────────────────────────
+    if source != "mpr" or plane == "axial":
+        slice_idx = int(roi.get("slice", plane_idx))
+        if slice_idx >= len(ct_slices):
+            return []
+        return _pixels_to_patient(points, ct_slices[slice_idx])
+
+    # ── MPR coronal / sagittal — one patient point per polygon vertex ─────────
+    flat = []
+    for (ix, iy) in points:
+        if plane == "coronal":
+            col = ncols - 1 - int(ix)   # un-flip horizontal
+            row = plane_idx              # fixed CT row = planeIndex
+            z   = int(iy)               # iy = CT slice index in the coronal view
+        else:  # sagittal
+            col = plane_idx             # fixed CT col = planeIndex
+            row = nrows - 1 - int(ix)  # un-flip horizontal
+            z   = int(iy)              # iy = CT slice index in the sagittal view
+
+        if z >= len(ct_slices):
+            continue
+        pt_mm = _pixels_to_patient([[col, row]], ct_slices[z])
+        flat.extend(pt_mm)
+
+    return flat
 
 
 def _build_rtstruct(rois: list[dict], ct_slices: list[dict]) -> FileDataset:
@@ -832,12 +905,7 @@ def _build_rtstruct(rois: list[dict], ct_slices: list[dict]) -> FileDataset:
     # ── ROIContourSequence — 3-D geometry for each ROI ─────────────────────────
     roi_contours = []
     for i, roi in enumerate(rois):
-        slice_idx = int(roi.get("slice", 0))
-        if slice_idx >= len(ct_slices):
-            # ROI references a slice that isn't in the uploaded CT — skip.
-            continue
-
-        contour_data = _pixels_to_patient(roi.get("points", []), ct_slices[slice_idx])
+        contour_data = _roi_contour_data(roi, ct_slices)
         if len(contour_data) < 9:   # need at least 3 points (3 × xyz = 9 floats)
             continue
 
