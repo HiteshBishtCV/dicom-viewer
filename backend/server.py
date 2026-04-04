@@ -1991,8 +1991,24 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
 
             def _run_proc(try_device):
                 """Run TotalSegmentator subprocess, return (seg_arr, captured_lines)."""
+                # Find the CLI binary next to the current Python interpreter.
+                # TotalSegmentator installs as "TotalSegmentator" (capital T);
+                # it has no __main__.py so `python -m totalsegmentator` fails.
+                bin_dir = os.path.dirname(sys.executable)
+                ts_bin  = None
+                for name in ("TotalSegmentator", "totalsegmentator"):
+                    candidate = os.path.join(bin_dir, name)
+                    if os.path.isfile(candidate):
+                        ts_bin = candidate
+                        break
+                if ts_bin is None:
+                    import shutil
+                    ts_bin = (shutil.which("TotalSegmentator") or
+                              shutil.which("totalsegmentator") or
+                              "TotalSegmentator")
+
                 run_cmd = [
-                    sys.executable, "-m", "totalsegmentator",
+                    ts_bin,
                     "-i", in_path,
                     "-o", str(out_dir),
                     "--task", "total",
