@@ -122,14 +122,23 @@ const roiDraw = (() => {
   // ── Polygon management ────────────────────────────────────────────────────
 
   function _close() {
+    const id    = Date.now();
+    const name  = `ROI ${_rois.length + 1}`;
     const color = PALETTE[_rois.length % PALETTE.length];
-    _rois.push({
-      id:         Date.now(),
-      name:       `ROI ${_rois.length + 1}`,
-      sliceIndex: _slice,
-      points:     [..._wip],
+
+    // Internal entry: points stay as {x,y} objects for pixelToCanvas().
+    _rois.push({ id, name, sliceIndex: _slice, points: [..._wip], color });
+
+    // Mirror to the global store using the canonical [[x,y]] format.
+    roiStore.add({
+      id,
+      name,
+      slice:  _slice,
+      points: _wip.map(p => [Math.round(p.x), Math.round(p.y)]),
       color,
+      source: 'draw2d',
     });
+
     _wip   = [];
     _mouse = null;
     _renderPanel();
@@ -140,6 +149,7 @@ const roiDraw = (() => {
 
   function deleteRoi(id) {
     _rois = _rois.filter(r => r.id !== id);
+    roiStore.remove(id);
     _renderPanel();
     redraw();
   }
@@ -255,9 +265,11 @@ const roiDraw = (() => {
   // ── Public: rename a completed ROI ────────────────────────────────────────
 
   function renameRoi(id, name) {
+    const trimmed = name.trim();
     const roi = _rois.find(r => r.id === id);
-    if (roi) roi.name = name.trim() || roi.name;
-    // No full re-render — just keep the updated value; re-render on next structural change.
+    if (roi && trimmed) roi.name = trimmed;
+    roiStore.update(id, { name: trimmed || (roi && roi.name) });
+    // No full re-render — input keeps focus; store is updated in place.
   }
 
   return { init, toggleDrawMode, isDrawing, setSlice, redraw, getRois, deleteRoi, renameRoi };
