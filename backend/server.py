@@ -2088,26 +2088,55 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
 
         # ── 6. Look up label IDs ──────────────────────────────────────────────
         _upd(82, "Extracting organ masks…")
+
+        present_set = set(int(x) for x in np.unique(seg_arr) if x != 0)
+        print(f"[ML-Seg] Labels present in output: {sorted(present_set)}", flush=True)
+
+        # Build inv from only the task-specific class_map (not merged across all
+        # tasks — merging causes label-ID conflicts between total/total_v1/etc.).
+        inv = {}   # label_id (int) → structure_name (str)
         try:
             from totalsegmentator.map_to_binary import class_map
-            cmap = class_map.get("total", {})
-            if not cmap:
-                for v in class_map.values():
-                    if v:
-                        cmap = v; break
-        except Exception:
-            cmap = {}
+            # Priority order: the task we actually ran.
+            for task_key in ("total", "total_v1", "total_mr"):
+                cmap = class_map.get(task_key, {})
+                if cmap:
+                    inv = {int(lid): name for lid, name in cmap.items()}
+                    print(f"[ML-Seg] Using class_map['{task_key}']: "
+                          f"{len(inv)} structures", flush=True)
+                    break
+        except Exception as e:
+            print(f"[ML-Seg] class_map import failed: {e}", flush=True)
 
-        inv = {name: lid for lid, name in cmap.items()}
+        # Find heart/lung labels by name in the present set.
+        def _labels_for(keywords):
+            return [lid for lid, name in inv.items()
+                    if lid in present_set and all(k in name.lower() for k in keywords)]
+
         WANT = {
-            "Heart":      [v for k, v in inv.items() if k == "heart"],
-            "Left Lung":  [v for k, v in inv.items() if "lung" in k and "left"  in k],
-            "Right Lung": [v for k, v in inv.items() if "lung" in k and "right" in k],
+            "Heart":      _labels_for(["heart"]),
+            "Left Lung":  _labels_for(["lung", "left"]),
+            "Right Lung": _labels_for(["lung", "right"]),
         }
-        FALLBACK = {"Heart": [52], "Left Lung": [13, 14], "Right Lung": [15, 16, 17]}
-        for name in WANT:
-            if not WANT[name]:
-                WANT[name] = FALLBACK[name]
+
+        # Verified fallbacks per task (from class_map inspection):
+        #   total  (v2): heart=51, left_lung=10+11, right_lung=12+13+14
+        #   total_v1:    heart chambers=44-48, left=13+14, right=15+16+17
+        FALLBACKS = {
+            "Heart":      [[51], [44, 45, 46, 47, 48]],
+            "Left Lung":  [[10, 11], [13, 14]],
+            "Right Lung": [[12, 13, 14], [15, 16, 17]],
+        }
+        for sname in WANT:
+            if not WANT[sname]:
+                for fb in FALLBACKS[sname]:
+                    valid = [l for l in fb if l in present_set]
+                    if valid:
+                        WANT[sname] = valid
+                        print(f"[ML-Seg] {sname}: using fallback IDs {valid}", flush=True)
+                        break
+
+        print(f"[ML-Seg] Final structure→labels: {WANT}", flush=True)
 
         # ── 7. Build contours ─────────────────────────────────────────────────
         _upd(88, "Building contours…")
