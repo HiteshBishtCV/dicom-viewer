@@ -40,36 +40,51 @@
     }
     #presets button:hover { background: #3a3a3a; color: #fff; }
 
-    #rtLegend {
-      display: none; flex-direction: column; gap: 3px; width: 512px;
-      padding: 6px 0; border-top: 1px solid #333; margin-top: 2px;
-      max-height: 180px; overflow-y: auto;
+    /* ── Structures panel ── */
+    #structBtn {
+      display: none; width: 512px; padding: 6px 0; border-radius: 4px;
+      cursor: pointer; font-size: 13px; font-weight: 600;
+      background: #2a2a2a; color: #ccc; border: 1px solid #444;
     }
-    #rtLegend label {
-      display: flex; align-items: center; gap: 6px;
-      font-size: 12px; color: #ccc; cursor: pointer; user-select: none;
+    #structBtn:hover { background: #3a3a3a; color: #fff; }
+
+    #structPanel {
+      display: none; flex-direction: column; gap: 14px;
+      background: #222; border: 1px solid #444; border-radius: 6px;
+      padding: 14px; width: 230px; font-size: 13px; align-self: flex-start;
     }
-    #rtLegend input[type=checkbox] { cursor: pointer; flex-shrink: 0; }
-    #rtLegend input[type=color] {
-      width: 22px; height: 16px; padding: 1px; border: 1px solid #555;
+    #structPanel h4 {
+      font-size: 14px; color: #aaa; margin: 0;
+      border-bottom: 1px solid #444; padding-bottom: 6px;
+    }
+    .sp-section { display: flex; flex-direction: column; gap: 6px; }
+    .sp-hdr {
+      font-size: 10px; font-weight: 700; color: #666;
+      letter-spacing: 0.8px; text-transform: uppercase;
+    }
+    .sp-empty { color: #555; font-size: 12px; }
+    .sp-row {
+      display: flex; align-items: center; gap: 5px;
+      padding: 2px 0; user-select: none;
+    }
+    .sp-row input[type=checkbox] { cursor: pointer; flex-shrink: 0; }
+    .sp-row input[type=color] {
+      width: 20px; height: 15px; padding: 1px; border: 1px solid #555;
       border-radius: 2px; cursor: pointer; background: none; flex-shrink: 0;
     }
+    .sp-name { font-size: 12px; color: #ccc; flex: 1; }
+    .sp-name-input {
+      flex: 1; background: #1a1a1a; border: 1px solid #444; border-radius: 3px;
+      color: #ccc; font-size: 12px; padding: 2px 5px; min-width: 0;
+    }
+    .sp-name-input:focus { outline: none; border-color: #0078d4; }
 
     #roiDrawBtn {
-      width: 512px; padding: 6px 0; border-radius: 4px; cursor: pointer;
-      font-size: 13px; font-weight: 600; background: #2a2a2a;
-      color: #ccc; border: 1px solid #444;
+      padding: 5px 0; border-radius: 4px; cursor: pointer;
+      font-size: 12px; font-weight: 600; background: #2a2a2a;
+      color: #ccc; border: 1px solid #444; width: 100%;
     }
     #roiDrawBtn:hover { background: #3a3a3a; color: #fff; }
-
-    #roiPanel {
-      margin-top: 10px; padding-top: 8px; border-top: 1px solid #333;
-    }
-    #roiPanel h5 {
-      font-size: 12px; color: #888; margin-bottom: 6px; font-weight: 600;
-      letter-spacing: 0.5px; text-transform: uppercase;
-    }
-    #roiList { display: flex; flex-direction: column; gap: 1px; }
 
     #mprBtnGroup {
       display: none; width: 512px; gap: 6px;
@@ -168,7 +183,6 @@
       <div id="dicomImage"></div>
       <input type="range" id="sliceSlider" min="0" max="0" value="0">
       <div id="sliceLabel">—</div>
-      <div id="rtLegend"></div>
       <div id="presets" style="display:none;">
         <button onclick="applyPreset(-600,1600)">Lung</button>
         <button onclick="applyPreset(400,1800)">Bone</button>
@@ -178,7 +192,7 @@
       <div id="modeIndicator" style="font-size:12px;color:#aaa;margin-top:2px;">
         ↕ Scroll mode &nbsp;(middle-click to switch)
       </div>
-      <button id="roiDrawBtn" onclick="toggleRoiDraw()">✏ Draw ROI</button>
+      <button id="structBtn" onclick="toggleStructPanel()">⊟ Structures</button>
       <div id="mprBtnGroup">
         <button id="mprCpuBtn" onclick="openMPRTab('cpu')">⊞ MPR — CPU</button>
         <button id="mprGpuBtn" onclick="openMPRTab('gpu')">⊞ MPR — GPU</button>
@@ -193,9 +207,25 @@
       <div class="wl-display">
         WL: <span id="meta-wc">—</span> &nbsp;|&nbsp; WW: <span id="meta-ww">—</span>
       </div>
-      <div id="roiPanel">
-        <h5>ROIs</h5>
-        <div id="roiList"><div style="color:#555;font-size:12px;padding:2px 0">No ROIs drawn</div></div>
+    </div>
+
+    <!-- ── Structures panel ────────────────────────────────────── -->
+    <div id="structPanel">
+      <h4>Structures</h4>
+
+      <div class="sp-section">
+        <div class="sp-hdr">From File (RTSTRUCT)</div>
+        <div id="rtStructList">
+          <div class="sp-empty">No RTSTRUCT loaded</div>
+        </div>
+      </div>
+
+      <div class="sp-section">
+        <div class="sp-hdr">Drawn ROIs</div>
+        <button id="roiDrawBtn" onclick="toggleRoiDraw()">✏ Draw ROI</button>
+        <div id="drawnRoiList">
+          <div class="sp-empty">No ROIs drawn</div>
+        </div>
       </div>
     </div>
   </div>

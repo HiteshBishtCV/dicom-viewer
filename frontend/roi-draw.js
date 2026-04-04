@@ -219,34 +219,47 @@ const roiDraw = (() => {
   // ── ROI list panel ────────────────────────────────────────────────────────
 
   function _renderPanel() {
-    const panel = document.getElementById('roiList');
+    // Renders into #drawnRoiList inside the Structures panel.
+    const panel = document.getElementById('drawnRoiList');
     if (!panel) return;
 
     if (!_rois.length) {
-      panel.innerHTML = '<div style="color:#555;font-size:12px;padding:2px 0">No ROIs drawn</div>';
+      panel.innerHTML = '<div class="sp-empty">No ROIs drawn</div>';
       return;
     }
 
     panel.innerHTML = _rois.map(r => `
-      <div style="display:flex;align-items:center;gap:6px;padding:2px 0;">
+      <div class="sp-row" style="align-items:center;">
         <span style="width:10px;height:10px;background:${r.color};border-radius:2px;
                      flex-shrink:0;display:inline-block;"></span>
-        <span style="flex:1;font-size:12px;color:#ccc;">
-          ${r.name}
-          <span style="color:#555;font-size:11px;">(sl.${r.sliceIndex + 1})</span>
-        </span>
+        <input class="sp-name-input" type="text" data-id="${r.id}" value="${r.name}"
+               title="Click to rename">
+        <span class="sp-empty" style="font-size:11px;white-space:nowrap;">sl.${r.sliceIndex + 1}</span>
         <button data-id="${r.id}"
-          style="background:none;border:none;color:#f66;cursor:pointer;font-size:11px;padding:0 2px;"
+          style="background:none;border:none;color:#f66;cursor:pointer;font-size:11px;padding:0 2px;flex-shrink:0;"
           title="Delete">✕</button>
       </div>`).join('');
 
-    // Wire delete buttons via delegation (avoids inline roiDraw.deleteRoi calls
-    // being blocked by some CSP policies).
+    // Name editing — update on blur or Enter, no re-render (preserves focus).
+    panel.querySelectorAll('.sp-name-input').forEach(input => {
+      const commit = () => renameRoi(Number(input.dataset.id), input.value);
+      input.addEventListener('blur',  commit);
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
+    });
+
     panel.querySelectorAll('button[data-id]').forEach(btn => {
       btn.addEventListener('click', () => deleteRoi(Number(btn.dataset.id)));
     });
   }
 
-  return { init, toggleDrawMode, isDrawing, setSlice, redraw, getRois, deleteRoi };
+  // ── Public: rename a completed ROI ────────────────────────────────────────
+
+  function renameRoi(id, name) {
+    const roi = _rois.find(r => r.id === id);
+    if (roi) roi.name = name.trim() || roi.name;
+    // No full re-render — just keep the updated value; re-render on next structural change.
+  }
+
+  return { init, toggleDrawMode, isDrawing, setSlice, redraw, getRois, deleteRoi, renameRoi };
 
 })();

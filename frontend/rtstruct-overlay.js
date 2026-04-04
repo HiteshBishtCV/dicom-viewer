@@ -99,7 +99,7 @@ function drawRtstructOverlay(element, sliceIndex) {
 }
 
 /**
- * Render a checkbox-per-ROI control list into #rtLegend.
+ * Render a checkbox-per-ROI control list into #rtStructList (Structures panel).
  * Each row: [checkbox] [color picker] [name]
  * Changes trigger cornerstone.updateImage() immediately.
  *
@@ -108,35 +108,35 @@ function drawRtstructOverlay(element, sliceIndex) {
  * called after app.js has executed, so `element` is guaranteed to exist.
  */
 function updateRtLegend() {
-  const el = document.getElementById('rtLegend');
+  // Renders RTSTRUCT ROI controls into #rtStructList inside the Structures panel.
+  const el = document.getElementById('rtStructList');
   if (!el) return;
 
   const rois = _roiList();
-  if (!rois.length) { el.style.display = 'none'; return; }
-
-  el.style.display = 'flex';
+  if (!rois.length) {
+    el.innerHTML = '<div class="sp-empty">No RTSTRUCT loaded</div>';
+    return;
+  }
 
   el.innerHTML = rois.map(({ number, name }) => {
     const color   = _roiColor[number] || '#ffffff';
     const checked = _roiHidden.has(number) ? '' : 'checked';
-    return `<label>
+    return `<label class="sp-row">
       <input type="checkbox" data-roi="${number}" ${checked}>
       <input type="color"    data-roi="${number}" value="${color}">
-      <span>${name}</span>
+      <span class="sp-name">${name}</span>
     </label>`;
   }).join('');
 
-  // Checkbox: toggle visibility, redraw.
   el.querySelectorAll('input[type=checkbox]').forEach(cb => {
     cb.addEventListener('change', () => {
       const num = parseInt(cb.dataset.roi, 10);
       if (cb.checked) _roiHidden.delete(num);
       else            _roiHidden.add(num);
-      cornerstone.updateImage(element);   // element is global from app.js
+      cornerstone.updateImage(element);
     });
   });
 
-  // Color picker: update palette entry, redraw.
   el.querySelectorAll('input[type=color]').forEach(picker => {
     picker.addEventListener('input', () => {
       _roiColor[parseInt(picker.dataset.roi, 10)] = picker.value;

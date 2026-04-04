@@ -292,6 +292,10 @@ function loadSeries(series) {
     document.getElementById('drrBtn').style.display = gpuAvail ? 'block' : 'none';
   }
 
+  // Show the Structures button now that a CT series is loaded.
+  const structBtn = document.getElementById('structBtn');
+  if (structBtn) structBtn.style.display = 'block';
+
   renderMetaPanel(series, total);
   displayImage(0);
 
@@ -427,26 +431,43 @@ function openDRRTab() {
 // ── RTSTRUCT overlay ──────────────────────────────────────────────────────────
 
 function activateRtstruct(series) {
+  // Always open the Structures panel — the user clicked an RTSTRUCT entry.
+  openStructPanel();
+
+  const rtList = document.getElementById('rtStructList');
+  if (rtList) rtList.innerHTML = '<div class="sp-empty">Loading…</div>';
+
   const path = series.metadata.path;
   loadRtstruct(path)
     .then(() => {
       updateRtLegend();
-      // Re-render the current slice so the overlay is drawn immediately.
-      // If no CT is loaded yet, show a prompt in infoPanel instead.
-      if (currentImageIds.length) {
-        displayImage(currentIndex);
-      } else {
-        infoPanel.style.display = 'block';
-        infoPanel.innerHTML =
-          '<p style="color:#aaa;padding:8px">Load a CT series first to see contour overlay.</p>';
-      }
+      if (currentImageIds.length) displayImage(currentIndex);
     })
     .catch(err => {
       console.error('RTSTRUCT load failed:', err);
-      infoPanel.style.display = 'block';
-      infoPanel.innerHTML =
-        `<p style="color:#f88;padding:8px">Failed to load RTSTRUCT: ${err.message}</p>`;
+      if (rtList) rtList.innerHTML =
+        `<div class="sp-empty" style="color:#f88;">Failed: ${err.message}</div>`;
     });
+}
+
+// ── Structures panel ──────────────────────────────────────────────────────────
+
+function toggleStructPanel() {
+  const panel = document.getElementById('structPanel');
+  const open  = panel.style.display === 'none' || panel.style.display === '';
+  panel.style.display = open ? 'flex' : 'none';
+  const btn = document.getElementById('structBtn');
+  if (btn) {
+    btn.style.color       = open ? '#4fc3f7' : '#ccc';
+    btn.style.borderColor = open ? '#0078d4' : '#444';
+  }
+}
+
+function openStructPanel() {
+  const panel = document.getElementById('structPanel');
+  panel.style.display = 'flex';
+  const btn = document.getElementById('structBtn');
+  if (btn) { btn.style.color = '#4fc3f7'; btn.style.borderColor = '#0078d4'; }
 }
 
 // ── ROI draw mode toggle ──────────────────────────────────────────────────────
@@ -455,8 +476,8 @@ function toggleRoiDraw() {
   const active = roiDraw.toggleDrawMode();
   const btn = document.getElementById('roiDrawBtn');
   if (btn) {
-    btn.textContent    = active ? '◼ Stop Drawing' : '✏ Draw ROI';
-    btn.style.color    = active ? '#ffb74d' : '#ccc';
+    btn.textContent       = active ? '◼ Stop Drawing' : '✏ Draw ROI';
+    btn.style.color       = active ? '#ffb74d' : '#ccc';
     btn.style.borderColor = active ? '#ffb74d' : '#444';
   }
 }
