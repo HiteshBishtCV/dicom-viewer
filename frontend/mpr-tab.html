@@ -95,6 +95,12 @@
       <div style="display:flex;align-items:center;gap:10px;">
         <span id="mprModeIndicator" style="font-size:12px;color:#aaa;">↕ Scroll mode &nbsp;(middle-click to switch)</span>
         <button onclick="resetMPRZoom()">⊠ Reset Zoom</button>
+        <button id="mprRoiDrawBtn"
+          onclick="mprRoi.toggleDrawMode()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;">
+          ✏ Draw ROI
+        </button>
       </div>
     </div>
 
@@ -120,9 +126,19 @@
       </div>
     </div>
 
+    <!-- ROI list below the three-pane grid -->
+    <div id="mprRoiPanel" style="margin-top:12px;">
+      <div style="font-size:10px;font-weight:700;color:#666;letter-spacing:0.8px;
+                  text-transform:uppercase;margin-bottom:6px;">Drawn ROIs</div>
+      <div id="mprRoiList">
+        <div style="color:#555;font-size:12px;">No ROIs drawn</div>
+      </div>
+    </div>
+
   </div>
 
   <script src="mpr.js"></script>
+  <script src="mpr-roi.js"></script>
   <script src="mpr-tab-init.js"></script>
 
 </body>

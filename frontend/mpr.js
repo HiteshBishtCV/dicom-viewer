@@ -79,6 +79,9 @@ function _doRender() {
   renderAxial(zIndex);
   renderCoronal(yIndex);
   renderSagittal(xIndex);
+
+  // Repaint ROI overlays on top of the freshly rendered image pixels.
+  if (typeof mprRoi !== 'undefined') mprRoi.redrawAll();
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

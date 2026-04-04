@@ -67,6 +67,9 @@
 
     // showMPRView is defined in mpr.js (loaded via <script> tag above).
     await showMPRView(series, imageIds, wc, ww);
+
+    // Attach ROI drawing listeners now that canvases are sized and rendered.
+    if (typeof mprRoi !== 'undefined') mprRoi.init();
   });
 
   // ── Helper ───────────────────────────────────────────────────────────────
