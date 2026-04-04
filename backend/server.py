@@ -1534,42 +1534,53 @@ def _do_segment_heart_seeded(
     def _mediastinum_slice(z):
         """
         Returns a 2-D bool array (nr, nc) of the mediastinum on slice z.
-        Falls back to False everywhere if two lung air regions cannot be found
-        (propagation will stop on those slices).
+        Returns False everywhere on non-thoracic slices so propagation stops.
+
+        Key insight: lungs often touch the FOV border, so we cannot just exclude
+        ALL border-touching air components (that removes the lungs too).  Instead
+        we remove only the SINGLE LARGEST border-touching component, which is
+        virtually always the external air outside the body.  Smaller components
+        that happen to clip the FOV border are kept as lung candidates.
         """
         air = vol[z] < -300
         labeled_2d, n = ndi.label(air)
         if n == 0:
             return np.zeros((nr, nc), dtype=bool)
 
+        sizes = {lbl: int((labeled_2d == lbl).sum()) for lbl in range(1, n + 1)}
+
+        # Find border-touching labels, then drop only the LARGEST one (external air).
         border = set()
         for edge in (labeled_2d[0], labeled_2d[-1],
                      labeled_2d[:, 0], labeled_2d[:, -1]):
             border.update(map(int, np.unique(edge)))
         border.discard(0)
 
-        internal = {
-            lbl: int((labeled_2d == lbl).sum())
-            for lbl in range(1, n + 1)
-            if lbl not in border and (labeled_2d == lbl).sum() >= 50
-        }
-        if len(internal) < 2:
-            return np.zeros((nr, nc), dtype=bool)   # no two lung fields → stop here
+        if border:
+            ext_lbl = max(border, key=lambda l: sizes.get(l, 0))
+            sizes.pop(ext_lbl, None)     # remove external air; keep everything else
 
-        top2  = sorted(internal, key=lambda l: -internal[l])[:2]
+        # Need at least two remaining regions large enough to be lungs.
+        min_lung_px = max(100, nr * nc // 2000)   # ~130 px on 512×512
+        candidates  = {l: s for l, s in sizes.items() if s >= min_lung_px}
+        if len(candidates) < 2:
+            return np.zeros((nr, nc), dtype=bool)   # can't locate two lungs → stop
+
+        top2  = sorted(candidates, key=lambda l: -candidates[l])[:2]
         cols_A = np.where((labeled_2d == top2[0]).any(axis=0))[0]
         cols_B = np.where((labeled_2d == top2[1]).any(axis=0))[0]
-        mean_A = float(cols_A.mean())
-        mean_B = float(cols_B.mean())
+        if cols_A.size == 0 or cols_B.size == 0:
+            return np.zeros((nr, nc), dtype=bool)
 
-        # Smaller mean col → right lung; larger → left lung (DICOM LPS)
+        mean_A, mean_B = float(cols_A.mean()), float(cols_B.mean())
+
+        # Smaller mean col → patient's right (right lung); larger → left lung.
         if mean_A < mean_B:
             c_start, c_end = int(cols_A.max()), int(cols_B.min())
         else:
             c_start, c_end = int(cols_B.max()), int(cols_A.min())
 
         if c_start >= c_end:
-            # Lungs overlap or no gap — widen a little
             mid = (c_start + c_end) // 2
             c_start, c_end = max(0, mid - 30), min(nc, mid + 30)
 

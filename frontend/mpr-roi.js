@@ -60,8 +60,11 @@ const mprRoi = (() => {
 
   let _drawing    = false;
   let _editing    = false;
+  let _freehand   = false;
   let _rois       = [];     // { id, name, canvasId, planeIndex, points:[{ix,iy}], color }
   let _wip        = null;   // { canvasId, planeIndex, points, mousePos }
+  let _fhWip      = null;   // freehand stroke: { canvasId, planeIndex, points, lastCx, lastCy }
+  let _fhDist     = 6;      // minimum canvas-pixel gap between freehand vertices (scroll adjusts)
   let _selectedId = null;   // id of currently selected ROI (edit mode)
   let _dragState  = null;   // { canvasId, roiId, vertexIdx }
 
@@ -79,6 +82,15 @@ const mprRoi = (() => {
       canvas.addEventListener('mousedown', e => _onMouseDown(e, id),     true);
       canvas.addEventListener('mouseup',   e => _onMouseUp(e, id),       true);
       canvas.addEventListener('mouseleave', () => _onMouseLeave(id));
+      // Scroll wheel in freehand mode changes brush spacing (vertex density).
+      // passive:false lets us call preventDefault() to block MPR scrolling.
+      canvas.addEventListener('wheel', e => {
+        if (!_freehand) return;
+        e.preventDefault();
+        e.stopPropagation();
+        _fhDist = Math.max(2, Math.min(40, _fhDist + (e.deltaY > 0 ? 2 : -2)));
+        _requestRedraw();
+      }, { passive: false });
     });
 
     // Delete / Backspace removes the selected ROI in edit mode.
@@ -97,27 +109,39 @@ const mprRoi = (() => {
   // ── Mode toggles ───────────────────────────────────────────────────────────
 
   function toggleDrawMode() {
-    if (_editing) _exitEdit();          // mutually exclusive
+    if (_editing)  _exitEdit();
+    if (_freehand) _exitFreehand();
     _drawing = !_drawing;
     if (!_drawing && _wip) { _wip = null; redrawAll(); }
     _syncCursors();
     _updateDrawBtn();
+    _updateFreehandBtn();
     _renderPanel();
     return _drawing;
   }
 
   function toggleEditMode() {
-    if (_drawing) {                     // mutually exclusive
-      _drawing = false;
-      if (_wip) { _wip = null; redrawAll(); }
-      _updateDrawBtn();
-    }
+    if (_drawing)  { _drawing = false; _wip = null; _updateDrawBtn(); }
+    if (_freehand) _exitFreehand();
     _editing = !_editing;
     if (!_editing) _exitEdit();
     _syncCursors();
     _updateEditBtn();
+    _updateFreehandBtn();
     redrawAll();
     return _editing;
+  }
+
+  function toggleFreehandMode() {
+    if (_drawing)  { _drawing = false; _wip = null; _updateDrawBtn(); }
+    if (_editing)  _exitEdit();
+    _freehand = !_freehand;
+    if (!_freehand) _exitFreehand();
+    _syncCursors();
+    _updateEditBtn();
+    _updateFreehandBtn();
+    redrawAll();
+    return _freehand;
   }
 
   function _exitEdit() {
@@ -126,16 +150,25 @@ const mprRoi = (() => {
     _editing    = false;
   }
 
+  function _exitFreehand() {
+    _fhWip    = null;
+    _freehand = false;
+  }
+
   function _syncCursors() {
     CANVAS_IDS.forEach(id => {
       const c = document.getElementById(id);
       if (!c) return;
-      c.style.cursor = _drawing ? 'crosshair' : _editing ? 'default' : '';
+      c.style.cursor = _drawing ? 'crosshair'
+                     : _editing  ? 'default'
+                     : _freehand ? 'crosshair'
+                     : '';
     });
   }
 
-  function isDrawing() { return _drawing; }
-  function isEditing() { return _editing; }
+  function isDrawing()   { return _drawing; }
+  function isEditing()   { return _editing; }
+  function isFreehand()  { return _freehand; }
 
   // ── Button label helpers ───────────────────────────────────────────────────
 
@@ -153,6 +186,14 @@ const mprRoi = (() => {
     btn.textContent       = _editing ? '◼ Stop Editing' : '✎ Edit ROI';
     btn.style.color       = _editing ? '#80cbc4' : '#ccc';
     btn.style.borderColor = _editing ? '#4db6ac' : '#444';
+  }
+
+  function _updateFreehandBtn() {
+    const btn = document.getElementById('mprRoiFreehandBtn');
+    if (!btn) return;
+    btn.textContent       = _freehand ? '◼ Stop Brush' : '✏ Brush';
+    btn.style.color       = _freehand ? '#ffaa00' : '#ccc';
+    btn.style.borderColor = _freehand ? '#ff9900' : '#444';
   }
 
   // ── Plane helpers ──────────────────────────────────────────────────────────
@@ -192,6 +233,7 @@ const mprRoi = (() => {
   // ── Draw mode event handlers ───────────────────────────────────────────────
 
   function _onClick(e, canvasId) {
+    if (_freehand) { e.stopPropagation(); return; }  // freehand uses mousedown/up
     if (!_drawing) return;
     if (e.detail >= 2) { e.stopPropagation(); return; }
     e.stopPropagation();
@@ -243,6 +285,25 @@ const mprRoi = (() => {
       return;
     }
 
+    // Freehand mode: accumulate vertices while button is held.
+    if (_freehand && _fhWip && _fhWip.canvasId === canvasId) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const cx   = (e.clientX - rect.left) * (canvas.width  / rect.width);
+      const cy   = (e.clientY - rect.top)  * (canvas.height / rect.height);
+      const dx   = cx - _fhWip.lastCx;
+      const dy   = cy - _fhWip.lastCy;
+      if (dx * dx + dy * dy >= _fhDist * _fhDist) {
+        const coords = _fromEvent(e, canvasId);
+        if (coords) _fhWip.points.push({ ix: coords.ix, iy: coords.iy });
+        _fhWip.lastCx = cx;
+        _fhWip.lastCy = cy;
+        _requestRedraw();
+      }
+      return;
+    }
+
     // Edit mode: live vertex drag.
     if (_editing && _dragState && _dragState.canvasId === canvasId) {
       const coords = _fromEvent(e, canvasId);
@@ -256,6 +317,23 @@ const mprRoi = (() => {
   }
 
   function _onMouseDown(e, canvasId) {
+    // Freehand mode: start a new stroke.
+    if (_freehand) {
+      e.stopPropagation();
+      const coords = _fromEvent(e, canvasId);
+      if (!coords) return;
+      const plane = _planeIndex(canvasId);
+      _fhWip = {
+        canvasId,
+        planeIndex: plane,
+        points:     [{ ix: coords.ix, iy: coords.iy }],
+        lastCx:     coords.cx,
+        lastCy:     coords.cy,
+      };
+      _requestRedraw();
+      return;
+    }
+
     if (!_editing) return;
     e.stopPropagation();
 
@@ -282,6 +360,14 @@ const mprRoi = (() => {
   }
 
   function _onMouseUp(e, canvasId) {
+    // Freehand: close stroke into an ROI.
+    if (_freehand && _fhWip && _fhWip.canvasId === canvasId) {
+      if (_fhWip.points.length >= 3) _closeFreehand();
+      _fhWip = null;
+      _requestRedraw();
+      return;
+    }
+
     if (!_editing || !_dragState || _dragState.canvasId !== canvasId) return;
     const roi = _rois.find(r => r.id === _dragState.roiId);
     if (roi) _syncToStore(roi);
@@ -392,6 +478,40 @@ const mprRoi = (() => {
 
     _wip = null;
     _redrawCanvas(canvasId);
+    _renderPanel();
+  }
+
+  // Close a freehand stroke into a named ROI.
+  function _closeFreehand() {
+    if (!_fhWip || _fhWip.points.length < 3) return;
+    const canvasId = _fhWip.canvasId;
+    const defName  = `ROI_${_rois.length + 1}`;
+    const input    = window.prompt('Name this ROI:', defName);
+    const name     = (input !== null && input.trim()) ? input.trim() : defName;
+    const id       = Date.now();
+    const color    = PALETTE[_rois.length % PALETTE.length];
+
+    const roi = {
+      id, name, canvasId,
+      planeIndex: _fhWip.planeIndex,
+      points:     [..._fhWip.points],
+      color,
+    };
+    _rois.push(roi);
+
+    if (typeof roiStore !== 'undefined') {
+      roiStore.add({
+        id, name,
+        slice:      _fhWip.planeIndex,
+        points:     _fhWip.points.map(p => [Math.round(p.ix), Math.round(p.iy)]),
+        color,
+        source:     'freehand',
+        plane:      PLANE_NAME[canvasId] ?? 'axial',
+        planeIndex: _fhWip.planeIndex,
+        canvasId,
+      });
+    }
+
     _renderPanel();
   }
 
@@ -512,7 +632,8 @@ const mprRoi = (() => {
          .forEach(r => _drawClosed(ctx, r, state, r.id === _selectedId));
 
     // In-progress polygon (draw mode only).
-    if (_wip && _wip.canvasId === canvasId) _drawWip(ctx, _wip, state);
+    if (_wip  && _wip.canvasId  === canvasId) _drawWip(ctx, _wip, state);
+    if (_fhWip && _fhWip.canvasId === canvasId) _drawFreehandWip(ctx, _fhWip, state);
   }
 
   // Draw thin dashed lines in `canvasId` showing the plane position of every
@@ -538,63 +659,96 @@ const mprRoi = (() => {
 
     const { offX, offY, drawW, drawH, srcW, srcH } = state;
 
+    // Group by (name, source-canvas) so multi-slice structures (e.g. 100 axial
+    // lung contours) appear as one shaded band rather than hundreds of lines.
+    const groups = new Map();
     for (const roi of others) {
-      let isHoriz, lineCoord;   // isHoriz true → horizontal; lineCoord in image space
+      const key = roi.name + '\0' + roi.canvasId;
+      if (!groups.has(key)) {
+        groups.set(key, { name: roi.name, srcCanvas: roi.canvasId,
+                          color: roi.color, indices: [] });
+      }
+      groups.get(key).indices.push(roi.planeIndex);
+    }
+
+    for (const { name, srcCanvas, color, indices } of groups.values()) {
+      const minIdx = Math.min(...indices);
+      const maxIdx = Math.max(...indices);
+
+      // Determine orientation + image-space coordinate range in the TARGET canvas.
+      let isHoriz, coordMin, coordMax, srcDim;
 
       if (canvasId === 'axialCanvas') {
-        if      (roi.canvasId === 'coronalCanvas')  { isHoriz = true;  lineCoord = roi.planeIndex; }
-        else if (roi.canvasId === 'sagittalCanvas') { isHoriz = false; lineCoord = roi.planeIndex; }
+        if      (srcCanvas === 'coronalCanvas')  { isHoriz = true;  srcDim = srcH; coordMin = minIdx; coordMax = maxIdx; }
+        else if (srcCanvas === 'sagittalCanvas') { isHoriz = false; srcDim = srcW; coordMin = minIdx; coordMax = maxIdx; }
         else continue;
-
       } else if (canvasId === 'coronalCanvas') {
-        if      (roi.canvasId === 'axialCanvas')    { isHoriz = true;  lineCoord = roi.planeIndex; }
-        else if (roi.canvasId === 'sagittalCanvas') { isHoriz = false; lineCoord = srcW - 1 - roi.planeIndex; }
+        if      (srcCanvas === 'axialCanvas')    { isHoriz = true;  srcDim = srcH; coordMin = minIdx; coordMax = maxIdx; }
+        else if (srcCanvas === 'sagittalCanvas') { isHoriz = false; srcDim = srcW; coordMin = srcW - 1 - maxIdx; coordMax = srcW - 1 - minIdx; }
         else continue;
-
       } else if (canvasId === 'sagittalCanvas') {
-        if      (roi.canvasId === 'axialCanvas')    { isHoriz = true;  lineCoord = roi.planeIndex; }
-        else if (roi.canvasId === 'coronalCanvas')  { isHoriz = false; lineCoord = srcW - 1 - roi.planeIndex; }
+        if      (srcCanvas === 'axialCanvas')    { isHoriz = true;  srcDim = srcH; coordMin = minIdx; coordMax = maxIdx; }
+        else if (srcCanvas === 'coronalCanvas')  { isHoriz = false; srcDim = srcW; coordMin = srcW - 1 - maxIdx; coordMax = srcW - 1 - minIdx; }
         else continue;
-      } else { continue; }
+      } else continue;
 
-      // Skip if the indicator falls outside the rendered image area.
-      const max = isHoriz ? srcH : srcW;
-      if (lineCoord < 0 || lineCoord >= max) continue;
+      coordMin = Math.max(0, Math.min(coordMin, srcDim - 1));
+      coordMax = Math.max(0, Math.min(coordMax, srcDim - 1));
+      if (coordMin > coordMax) continue;
 
-      // Convert image-space coordinate to canvas pixels.
-      let x1, y1, x2, y2, labelX, labelY;
-      if (isHoriz) {
-        const cy = offY + (lineCoord / srcH) * drawH;
-        x1 = offX;  y1 = cy;
-        x2 = offX + drawW; y2 = cy;
-        labelX = offX + 4;
-        labelY = cy - 13;
-      } else {
-        const cx = offX + (lineCoord / srcW) * drawW;
-        x1 = cx; y1 = offY;
-        x2 = cx; y2 = offY + drawH;
-        labelX = cx + 4;
-        labelY = offY + 4;
-      }
+      // Canvas-pixel positions for the start/end of the band.
+      const px1 = isHoriz
+        ? offY + (coordMin / srcH) * drawH
+        : offX + (coordMin / srcW) * drawW;
+      const px2 = isHoriz
+        ? offY + (coordMax / srcH) * drawH
+        : offX + (coordMax / srcW) * drawW;
 
       ctx.save();
-      ctx.strokeStyle = roi.color + 'b3';   // ~70% opacity
-      ctx.lineWidth   = 1;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-      ctx.setLineDash([]);
 
-      // Name tag beside the line.
-      ctx.font         = 'bold 10px sans-serif';
-      ctx.textAlign    = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle    = 'rgba(0,0,0,0.55)';
-      ctx.fillText(roi.name, labelX + 1, labelY + 1);
-      ctx.fillStyle    = roi.color + 'cc';
-      ctx.fillText(roi.name, labelX, labelY);
+      if (minIdx === maxIdx) {
+        // ── Single slice → thin dashed line (original style) ─────────────
+        ctx.strokeStyle = color + 'b3';
+        ctx.lineWidth   = 1;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        if (isHoriz) {
+          ctx.moveTo(offX, px1); ctx.lineTo(offX + drawW, px1);
+        } else {
+          ctx.moveTo(px1, offY); ctx.lineTo(px1, offY + drawH);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        const lx = isHoriz ? offX + 4 : px1 + 4;
+        const ly = isHoriz ? px1 - 13  : offY + 4;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillText(name, lx + 1, ly + 1);
+        ctx.fillStyle = color + 'cc';        ctx.fillText(name, lx,     ly);
+
+      } else {
+        // ── Multiple slices → semi-transparent band ───────────────────────
+        let bx, by, bw, bh;
+        if (isHoriz) { bx = offX;  by = px1;  bw = drawW;      bh = px2 - px1; }
+        else         { bx = px1;   by = offY;  bw = px2 - px1;  bh = drawH;     }
+
+        ctx.fillStyle   = color + '1a';   // ~10% opacity fill
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.strokeStyle = color + '66';
+        ctx.lineWidth   = 1;
+        ctx.setLineDash([3, 2]);
+        ctx.strokeRect(bx, by, bw, bh);
+        ctx.setLineDash([]);
+
+        // Name label centred in the band.
+        ctx.font         = 'bold 10px sans-serif';
+        const lx = isHoriz ? bx + 4       : bx + bw / 2;
+        const ly = isHoriz ? by + bh / 2   : by + 4;
+        ctx.textAlign    = isHoriz ? 'left'   : 'center';
+        ctx.textBaseline = isHoriz ? 'middle' : 'top';
+        ctx.fillStyle    = 'rgba(0,0,0,0.6)'; ctx.fillText(name, lx + 1, ly + 1);
+        ctx.fillStyle    = color + 'cc';       ctx.fillText(name, lx,     ly);
+      }
 
       ctx.restore();
     }
@@ -693,6 +847,52 @@ const mprRoi = (() => {
       ctx.arc(p.x, p.y, i === 0 ? 5 : 3, 0, Math.PI * 2);
       ctx.fill();
     });
+
+    ctx.restore();
+  }
+
+  function _drawFreehandWip(ctx, wip, state) {
+    const pts = wip.points.map(p => _toCanvas(p, state));
+    if (!pts.length) return;
+
+    ctx.save();
+    ctx.strokeStyle = '#ffaa00';
+    ctx.lineWidth   = 2;
+    ctx.lineJoin    = 'round';
+    ctx.lineCap     = 'round';
+
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.stroke();
+
+    // Closing line preview (dashed)
+    if (pts.length >= 3) {
+      const last = pts[pts.length - 1];
+      ctx.strokeStyle = '#ffaa0066';
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(last.x, last.y);
+      ctx.lineTo(pts[0].x, pts[0].y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Brush-size indicator circle at last vertex + spacing label
+    const last = pts[pts.length - 1];
+    ctx.strokeStyle = 'rgba(255,170,0,0.5)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([3, 2]);
+    ctx.beginPath();
+    ctx.arc(last.x, last.y, _fhDist, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font         = '10px sans-serif';
+    ctx.fillStyle    = '#ffaa00cc';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`spacing ${_fhDist}px  (scroll ↕)`, last.x + _fhDist + 4, last.y - 6);
 
     ctx.restore();
   }
@@ -951,6 +1151,7 @@ const mprRoi = (() => {
     toggleEditMode, isEditing,
     redrawAll, getRois,
     deleteRoi, renameRoi, toggleRoiVisibility,
+    toggleFreehandMode, isFreehand,
     importRois,
     interpolate, clearInterpolated, getInterpolatable,
   };
