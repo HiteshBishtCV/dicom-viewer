@@ -122,9 +122,11 @@ const roiDraw = (() => {
   // ── Polygon management ────────────────────────────────────────────────────
 
   function _close() {
-    const id    = Date.now();
-    const name  = `ROI ${_rois.length + 1}`;
-    const color = PALETTE[_rois.length % PALETTE.length];
+    const id      = Date.now();
+    const defName = `ROI_${_rois.length + 1}`;
+    const color   = PALETTE[_rois.length % PALETTE.length];
+    const input   = window.prompt('Name this ROI:', defName);
+    const name    = (input !== null && input.trim()) ? input.trim() : defName;
 
     // Internal entry: points stay as {x,y} objects for pixelToCanvas().
     _rois.push({ id, name, sliceIndex: _slice, points: [..._wip], color });
@@ -193,6 +195,17 @@ const roiDraw = (() => {
       _ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
       _ctx.fill();
     });
+
+    // Name label at centroid
+    const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+    const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+    _ctx.font         = 'bold 12px sans-serif';
+    _ctx.textAlign    = 'center';
+    _ctx.textBaseline = 'middle';
+    _ctx.fillStyle    = 'rgba(0,0,0,0.6)';
+    _ctx.fillText(roi.name, cx + 1, cy + 1);
+    _ctx.fillStyle    = roi.color;
+    _ctx.fillText(roi.name, cx, cy);
 
     _ctx.restore();
   }

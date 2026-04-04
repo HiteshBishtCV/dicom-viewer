@@ -26,6 +26,10 @@ Static HTML/JS app — no build step. All scripts loaded via `<script>` tags or 
 | `vol-tab.html` + `vol-tab-init.js` | Standalone 3D volume tab |
 | `drr-render.js` | GPU DRR renderer: orthographic Beer-Lambert ray-sum |
 | `drr-tab.html` + `drr-tab-init.js` | Standalone DRR tab |
+| `roi-store.js` | Global ROI store: single source of truth for all drawn ROIs (id, name, slice, points, color) |
+| `roi-draw.js` | 2D viewer polygon ROI: click-to-add vertices, close on first-vertex click or dblclick, `window.prompt` for name, label at centroid |
+| `mpr-roi.js` | MPR polygon ROI: same UX on all three canvases; plane-index-aware so ROIs only show on the correct slice |
+| `rtstruct-overlay.js` | RT structure set overlay renderer |
 
 Frontend fetches from `http://127.0.0.1:8000` and loads images via the `wadouri:` scheme.
 
@@ -60,6 +64,8 @@ pip install fastapi uvicorn pydicom python-multipart
 - All GPU renderers share one WebGL context from `gpu-volume.js` (`preserveDrawingBuffer: true`)
 - Volume texture format: `R16F` + `FLOAT` (WebGL2) for ~1024 distinct HU levels; `LUMINANCE` + `UNSIGNED_BYTE` (WebGL1 fallback)
 - Slices sorted descending by `ImagePositionPatient` z before volume build (superior-first)
+- ROI naming: after polygon close, `window.prompt()` asks for a name; default `ROI_N`; name displayed as canvas text at centroid (coloured + dark shadow)
+- ROI store (`roiStore`) uses canonical `[[x,y]]` point format; `roi-draw.js` uses `{x,y}` objects internally for Cornerstone's `pixelToCanvas`
 
 ## GPU Rendering Notes
 

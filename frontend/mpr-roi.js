@@ -175,9 +175,12 @@ const mprRoi = (() => {
 
   function _close(canvasId) {
     if (!_wip || _wip.points.length < 3) return;
+    const defName = `ROI_${_rois.length + 1}`;
+    const input   = window.prompt('Name this ROI:', defName);
+    const name    = (input !== null && input.trim()) ? input.trim() : defName;
     _rois.push({
       id:         Date.now(),
-      name:       `ROI ${_rois.length + 1}`,
+      name,
       canvasId,
       planeIndex: _wip.planeIndex,
       points:     [..._wip.points],
@@ -253,6 +256,17 @@ const mprRoi = (() => {
       ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
       ctx.fill();
     });
+
+    // Name label at centroid
+    const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+    const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+    ctx.font         = 'bold 12px sans-serif';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = 'rgba(0,0,0,0.6)';
+    ctx.fillText(roi.name, cx + 1, cy + 1);
+    ctx.fillStyle    = roi.color;
+    ctx.fillText(roi.name, cx, cy);
 
     ctx.restore();
   }

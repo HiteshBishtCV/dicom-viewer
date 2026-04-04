@@ -48,7 +48,7 @@ const roiStore = (() => {
   function add(entry) {
     const roi = {
       id:     entry.id     ?? Date.now(),
-      name:   entry.name   ?? 'Unnamed ROI',
+      name:   entry.name   ?? 'ROI_1',
       slice:  entry.slice  ?? 0,
       points: entry.points ?? [],   // [[x,y], ...]
       color:  entry.color  ?? '#ffffff',

@@ -47,6 +47,19 @@ firefox frontend/index.html
 
 ---
 
+### Polygon ROI Drawing
+
+Available in both the 2D viewer and MPR view.
+
+- **Draw mode** — toggle with the "Draw ROI" button; cursor changes to crosshair
+- **Click** to add vertices; **double-click** or **click the first vertex** (highlighted yellow when closeable) to close the polygon
+- **Name prompt** — after closing, a dialog prompts for a name; default is `ROI_1`, `ROI_2`, … (press Enter or cancel to accept the default)
+- **Label on image** — the ROI name is rendered at the polygon centroid in the ROI's colour
+- **Structures panel** — lists all ROIs with an inline rename input, slice/plane position, and a delete button
+- Points stored in image-pixel coordinates and re-projected each frame so ROIs stay aligned through zoom and pan
+
+---
+
 ### 2D Viewer
 
 - Upload an entire DICOM folder — files are grouped by `SeriesInstanceUID`
@@ -213,6 +226,11 @@ dicom-viewer/
 ---
 
 ## Changelog
+
+### ROI naming
+- `roi-draw.js`, `mpr-roi.js`: `window.prompt()` after polygon close; default `ROI_N` accepted on cancel or blank
+- `roi-draw.js`, `mpr-roi.js`: name label rendered at polygon centroid with drop-shadow for legibility
+- `roi-store.js`: fallback default name updated to `ROI_1`
 
 ### DRR renderer
 - `drr-render.js`: WebGL2 orthographic parallel-ray Beer-Lambert integration
