@@ -196,9 +196,10 @@ const SEG_COLORS = {
   'Heart':      '#ef5350',
 };
 
-let _segPickState = null;   // null | 'left' | 'right'
-let _segSeedLeft  = null;   // {slice, col, row}
-let _segListening = false;  // click handler attached to axialCanvas?
+let _segPickState    = null;   // null | 'left' | 'right'
+let _segSeedLeft     = null;   // {slice, col, row}
+let _segListening    = false;  // click handler attached to axialCanvas?
+let _previewRoiIds   = [];     // IDs of temporary left-lung preview ROIs
 
 function _segStatus(msg, color = '#aaa') {
   const el = document.getElementById('mprSegStatus');
@@ -241,10 +242,12 @@ function _handleSeedClick(e) {
   if (_segPickState === 'left') {
     _segSeedLeft  = seed;
     _segPickState = 'right';
-    _segStatus('Seed 1 recorded. Now click inside the RIGHT lung.', '#81c784');
+    _segStatus('Left seed recorded — loading preview…', '#4fc3f7');
+    _runLeftLungPreview(seed);
   } else if (_segPickState === 'right') {
     _segPickState = null;
     _detachSeedListener();
+    _clearPreviewRois();
     _runLungSegmentation(_segSeedLeft, seed);
   }
 }
@@ -272,13 +275,72 @@ function startLungSeedPicker() {
   _attachSeedListener();
 }
 
+/** Remove temporary preview ROIs (left-lung preview before right seed). */
+function _clearPreviewRois() {
+  if (typeof mprRoi === 'undefined') return;
+  for (const id of _previewRoiIds) mprRoi.deleteRoi(id);
+  _previewRoiIds = [];
+}
+
 /** Cancel any in-progress seed-picking or segmentation. */
 function cancelSegPicker() {
   _segPickState = null;
   _segSeedLeft  = null;
   _detachSeedListener();
+  _clearPreviewRois();
   _segStatus('');
   _segBtnDisable(false);
+}
+
+/**
+ * POST /preview-lung with the left seed and overlay the result immediately.
+ * The preview ROIs use a lighter opacity / dashed style (source:'preview')
+ * so the user can verify the boundary before placing the right-lung seed.
+ */
+async function _runLeftLungPreview(seed) {
+  try {
+    const res = await fetch(`${SEG_API}/preview-lung`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        series_uid: window._mprSeriesUid ?? '',
+        seed: [seed.slice, seed.col, seed.row],
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      _segStatus(
+        `Left lung preview failed: ${err.detail ?? 'HTTP ' + res.status} — ` +
+        'now click inside the RIGHT lung.',
+        '#f88'
+      );
+      return;
+    }
+    const data = await res.json();
+    const rois = (data.contours ?? []).map(c => ({
+      id:         Date.now() + Math.random(),
+      name:       'Left Lung (preview)',
+      slice:      c.slice,
+      points:     c.points,
+      color:      '#4fc3f7',
+      source:     'preview',
+      plane:      'axial',
+      canvasId:   'axialCanvas',
+      planeIndex: c.slice,
+    }));
+    _previewRoiIds = rois.map(r => r.id);
+    if (rois.length) mprRoi.importRois(rois);
+    _segStatus(
+      `Left lung preview: ${rois.length} slices. ` +
+      'If it looks wrong, click Cancel and try again. Otherwise click inside the RIGHT lung.',
+      '#4fc3f7'
+    );
+  } catch (err) {
+    _segStatus(
+      `Left lung preview error: ${err.message} — click inside the RIGHT lung to continue.`,
+      '#f88'
+    );
+  }
 }
 
 /** POST /segment-lungs and import results. */
@@ -305,6 +367,8 @@ async function _runLungSegmentation(seedLeft, seedRight) {
     });
     _segStatus(`Lungs segmented — ${total} contours loaded.`, '#81c784');
   } catch (err) {
+    // If segmentation failed after preview was shown, restore the picker so
+    // the user can try the right-seed click again or cancel.
     _segStatus(`Lung segmentation failed: ${err.message}`, '#f44');
   } finally {
     _segBtnDisable(false);

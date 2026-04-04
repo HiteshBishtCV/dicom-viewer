@@ -1290,6 +1290,91 @@ def _mask_to_contours(mask: np.ndarray, n_points: int = 96) -> list:
 
 # ── Lung segmentation ──────────────────────────────────────────────────────────
 
+def _segment_one_lung_2d(
+    vol: np.ndarray,
+    seed_z: int, seed_row: int, seed_col: int,
+    pixel_spacing: float,
+) -> "np.ndarray | None":
+    """
+    Extract one lung mask using 2-D per-slice propagation.
+
+    Avoids 3-D labeling entirely, so the two lungs (connected in 3-D via the
+    trachea/carina) always remain separate regions.  Also avoids the failure
+    mode where a lung touching the FOV border gets deleted by the global
+    external-air removal step.
+
+    Algorithm
+    ---------
+    1. On the seed slice, do 2-D connected components on the air mask.
+       Try to pick a non-border-touching label first; fall back to any label
+       if the lung clips the FOV edge.
+    2. Search a 20 mm neighbourhood around (seed_row, seed_col) to tolerate
+       clicks on nodules / vessels.
+    3. Propagate the selected region upward and downward one slice at a time:
+       on each new slice find the 2-D component(s) that overlap the previous
+       slice's mask, and keep the largest.
+    4. Returns bool array (nz, nr, nc), or None if no air found near the seed.
+    """
+    nz, nr, nc  = vol.shape
+    air_mask    = vol < -300
+    r_px        = max(10, round(20.0 / float(pixel_spacing)))
+
+    def _label_slice(z):
+        labeled_2d, _ = ndi.label(air_mask[z])
+        border = set()
+        for edge in (labeled_2d[0], labeled_2d[-1],
+                     labeled_2d[:, 0], labeled_2d[:, -1]):
+            border.update(map(int, np.unique(edge)))
+        border.discard(0)
+        return labeled_2d, border
+
+    def _pick_label(labeled_2d, border, row, col):
+        """Return the best label in the neighbourhood; prefer non-border."""
+        r0 = max(0, row - r_px);  r1 = min(nr, row + r_px + 1)
+        c0 = max(0, col - r_px);  c1 = min(nc, col + r_px + 1)
+        sub = labeled_2d[r0:r1, c0:c1].ravel()
+        # Prefer internal labels (non-border)
+        internal = sub[(sub > 0) & ~np.isin(sub, list(border))]
+        if internal.size:
+            vals, counts = np.unique(internal, return_counts=True)
+            return int(vals[np.argmax(counts)])
+        # Fallback: any non-zero label (handles lungs touching FOV edge)
+        any_label = sub[sub > 0]
+        if any_label.size:
+            vals, counts = np.unique(any_label, return_counts=True)
+            return int(vals[np.argmax(counts)])
+        return 0
+
+    # Step 1-2: find seed label on the seed slice
+    labeled_seed, border_seed = _label_slice(seed_z)
+    lbl = _pick_label(labeled_seed, border_seed, seed_row, seed_col)
+    if lbl == 0:
+        return None
+
+    mask_3d = np.zeros((nz, nr, nc), dtype=bool)
+    mask_3d[seed_z] = (labeled_seed == lbl)
+
+    # Step 3: propagate up and down
+    for direction in (1, -1):
+        prev = mask_3d[seed_z]
+        z    = seed_z + direction
+        while 0 <= z < nz:
+            labeled_2d, border = _label_slice(z)
+            overlap = labeled_2d[prev & air_mask[z]]
+            # Prefer non-border overlapping labels; fall back to any overlapping
+            valid   = set(map(int, overlap)) - {0}
+            non_brd = valid - border
+            use     = non_brd if non_brd else valid
+            if not use:
+                break
+            best = max(use, key=lambda l: int((labeled_2d == l).sum()))
+            mask_3d[z] = (labeled_2d == best)
+            prev = mask_3d[z]
+            z   += direction
+
+    return mask_3d if mask_3d.any() else None
+
+
 def _do_segment_lungs(
     vol:            np.ndarray,
     seed_left:      tuple,          # (z, row, col)
@@ -1300,48 +1385,38 @@ def _do_segment_lungs(
     """
     Full lung segmentation pipeline (synchronous; call via asyncio.to_thread).
 
-    1. Threshold at −300 HU → air-like binary mask.
-    2. Remove external air (border-connected components).
-    3. 3-D label → find component nearest each seed (20 mm search radius).
-    4. Per-slice 2-D disk closing (15 mm radius) to fill nodule holes.
+    Uses 2-D per-slice propagation so the two lungs never merge via the
+    trachea, and lungs touching the FOV edge are not deleted.
 
     Returns (left_mask, right_mask), each bool array shape (nz, nr, nc).
     """
-    # 1 — threshold
-    air_mask = vol < -300
-
-    # 2 — remove external air
-    internal = _remove_external_air(air_mask)
-
-    # 3 — label + seed lookup with 20 mm neighbourhood tolerance
-    labeled, _ = ndi.label(internal)
     sz_l, sr_l, sc_l = seed_left
     sz_r, sr_r, sc_r = seed_right
 
-    r_px = max(10, round(20.0 / float(pixel_spacing)))
-    lbl_left  = _nearest_label(labeled, sz_l, sr_l, sc_l, r_px)
-    lbl_right = _nearest_label(labeled, sz_r, sr_r, sc_r, r_px)
-
-    if lbl_left == 0:
+    left_raw = _segment_one_lung_2d(vol, sz_l, sr_l, sc_l, pixel_spacing)
+    if left_raw is None:
         raise ValueError(
-            "No lung air found within 20 mm of the LEFT seed point. "
+            "No lung air found near the LEFT seed point. "
+            "Try clicking closer to the centre of the lung field on an axial slice."
+        )
+
+    right_raw = _segment_one_lung_2d(vol, sz_r, sr_r, sc_r, pixel_spacing)
+    if right_raw is None:
+        raise ValueError(
+            "No lung air found near the RIGHT seed point. "
             "Try clicking closer to the centre of the lung field."
         )
-    if lbl_right == 0:
+
+    # Warn if both seeds ended up in overlapping regions (user clicked same lung)
+    overlap_vox = int((left_raw & right_raw).sum())
+    max_vox     = int(max(left_raw.sum(), right_raw.sum()))
+    if max_vox > 0 and overlap_vox / max_vox > 0.5:
         raise ValueError(
-            "No lung air found within 20 mm of the RIGHT seed point. "
-            "Try clicking closer to the centre of the lung field."
-        )
-    if lbl_left == lbl_right:
-        raise ValueError(
-            "Both seed points resolved to the same region. "
-            "Click in two clearly separate lung fields."
+            "Both seeds appear to be inside the same lung. "
+            "Click inside the LEFT lung first, then inside the RIGHT lung."
         )
 
-    left_raw  = (labeled == lbl_left)
-    right_raw = (labeled == lbl_right)
-
-    # 4 — per-slice 2-D closing (fills nodules; much faster than 3-D closing)
+    # Per-slice 2-D closing (fills nodules; much faster than 3-D closing)
     r_xy = max(3, round(15.0 / float(pixel_spacing)))
     left_filled  = _close_mask_2d(left_raw,  r_xy)
     right_filled = _close_mask_2d(right_raw, r_xy)
@@ -1418,6 +1493,53 @@ def _do_segment_heart(
 # background thread.  This keeps FastAPI's event loop responsive: the
 # browser can still fetch WADO slice images while segmentation is running,
 # so MPR/volume views continue to work during processing.
+
+@app.post("/preview-lung")
+async def preview_lung(payload: dict = Body(...)):
+    """
+    Segment ONE lung from a single seed point and return its contours.
+    Called immediately after the user places the first seed so they can verify
+    the left-lung boundary before placing the second seed.
+
+    Body: { "series_uid": "", "seed": [slice_idx, col, row] }
+    Response: { "contours": [{slice, points},...], "voxel_count": N }
+    """
+    series_uid = payload.get("series_uid", "")
+    s = payload.get("seed", [])
+    if len(s) != 3:
+        raise HTTPException(status_code=422, detail="seed must be [slice_idx, col, row]")
+
+    seed = (int(s[0]), int(s[2]), int(s[1]))   # → (z, row, col)
+
+    def _run():
+        vol, meta = _load_ct_volume(series_uid)
+        if vol is None:
+            return None
+        psp = float(meta[0]["ps"][0])
+        mask = _segment_one_lung_2d(vol, seed[0], seed[1], seed[2], psp)
+        if mask is None:
+            raise ValueError(
+                "No lung air found near the seed point. "
+                "Try clicking closer to the centre of the lung on an axial slice."
+            )
+        r_xy = max(3, round(15.0 / psp))
+        filled = _close_mask_2d(mask, r_xy)
+        return {
+            "contours":    _mask_to_contours(filled),
+            "voxel_count": int(filled.sum()),
+        }
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Preview error: {e}")
+
+    if result is None:
+        raise HTTPException(status_code=422, detail="No CT slices found in uploaded_dicoms/")
+    return result
+
 
 @app.post("/segment-lungs")
 async def segment_lungs(payload: dict = Body(...)):
