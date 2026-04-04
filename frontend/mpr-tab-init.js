@@ -388,9 +388,10 @@ function startHeartSeedPicker() {
   _attachSeedListener();
 }
 
-/** POST /segment-heart with seed and import results. */
+/** POST /segment-heart with seed and optional bbox from seg boxes. */
 async function _runHeartSegmentation(seed) {
   _segStatus('Segmenting heart… (may take a few seconds)', '#ef5350');
+  const bbox = (typeof mprRoi !== 'undefined') ? mprRoi.getSegBoxes() : {};
   try {
     const res = await fetch(`${SEG_API}/segment-heart`, {
       method:  'POST',
@@ -398,6 +399,7 @@ async function _runHeartSegmentation(seed) {
       body:    JSON.stringify({
         series_uid: window._mprSeriesUid ?? '',
         seed: [seed.slice, seed.col, seed.row],
+        bbox: Object.keys(bbox).length ? bbox : null,
       }),
     });
     if (!res.ok) {

@@ -61,12 +61,15 @@ const mprRoi = (() => {
   let _drawing    = false;
   let _editing    = false;
   let _freehand   = false;
+  let _boxMode    = false;
   let _rois       = [];     // { id, name, canvasId, planeIndex, points:[{ix,iy}], color }
   let _wip        = null;   // { canvasId, planeIndex, points, mousePos }
   let _fhWip      = null;   // freehand stroke: { canvasId, planeIndex, points, lastCx, lastCy }
   let _fhDist     = 6;      // minimum canvas-pixel gap between freehand vertices (scroll adjusts)
   let _selectedId = null;   // id of currently selected ROI (edit mode)
   let _dragState  = null;   // { canvasId, roiId, vertexIdx }
+  let _segBoxes   = {};     // { canvasId: {ix1, iy1, ix2, iy2} } — committed seg boxes
+  let _boxWip     = null;   // { canvasId, ix1, iy1, ix2, iy2 } — in-progress box
 
   // ── Init ───────────────────────────────────────────────────────────────────
 
@@ -111,6 +114,7 @@ const mprRoi = (() => {
   function toggleDrawMode() {
     if (_editing)  _exitEdit();
     if (_freehand) _exitFreehand();
+    if (_boxMode)  _exitBoxMode();
     _drawing = !_drawing;
     if (!_drawing && _wip) { _wip = null; redrawAll(); }
     _syncCursors();
@@ -123,6 +127,7 @@ const mprRoi = (() => {
   function toggleEditMode() {
     if (_drawing)  { _drawing = false; _wip = null; _updateDrawBtn(); }
     if (_freehand) _exitFreehand();
+    if (_boxMode)  _exitBoxMode();
     _editing = !_editing;
     if (!_editing) _exitEdit();
     _syncCursors();
@@ -135,6 +140,7 @@ const mprRoi = (() => {
   function toggleFreehandMode() {
     if (_drawing)  { _drawing = false; _wip = null; _updateDrawBtn(); }
     if (_editing)  _exitEdit();
+    if (_boxMode)  _exitBoxMode();
     _freehand = !_freehand;
     if (!_freehand) _exitFreehand();
     _syncCursors();
@@ -155,6 +161,47 @@ const mprRoi = (() => {
     _freehand = false;
   }
 
+  function _exitBoxMode() {
+    _boxWip  = null;
+    _boxMode = false;
+    _updateBoxBtn();
+  }
+
+  function toggleBoxMode() {
+    if (_drawing)  { _drawing = false; _wip = null; _updateDrawBtn(); }
+    if (_editing)  _exitEdit();
+    if (_freehand) _exitFreehand();
+    _boxMode = !_boxMode;
+    if (!_boxMode) _boxWip = null;
+    _syncCursors();
+    _updateBoxBtn();
+    redrawAll();
+    return _boxMode;
+  }
+
+  function clearSegBoxes() {
+    _segBoxes = {};
+    _boxWip   = null;
+    redrawAll();
+  }
+
+  /**
+   * Return a flat bbox dict for the backend.
+   * E.g. { axial_ix1:10, axial_iy1:20, axial_ix2:200, axial_iy2:300, ... }
+   */
+  function getSegBoxes() {
+    const result = {};
+    for (const [cid, box] of Object.entries(_segBoxes)) {
+      // 'axialCanvas' → 'axial', 'coronalCanvas' → 'coronal', etc.
+      const prefix = cid.replace('Canvas', '').toLowerCase();
+      result[`${prefix}_ix1`] = Math.round(Math.min(box.ix1, box.ix2));
+      result[`${prefix}_iy1`] = Math.round(Math.min(box.iy1, box.iy2));
+      result[`${prefix}_ix2`] = Math.round(Math.max(box.ix1, box.ix2));
+      result[`${prefix}_iy2`] = Math.round(Math.max(box.iy1, box.iy2));
+    }
+    return result;
+  }
+
   function _syncCursors() {
     CANVAS_IDS.forEach(id => {
       const c = document.getElementById(id);
@@ -162,6 +209,7 @@ const mprRoi = (() => {
       c.style.cursor = _drawing ? 'crosshair'
                      : _editing  ? 'default'
                      : _freehand ? 'crosshair'
+                     : _boxMode  ? 'crosshair'
                      : '';
     });
   }
@@ -169,6 +217,7 @@ const mprRoi = (() => {
   function isDrawing()   { return _drawing; }
   function isEditing()   { return _editing; }
   function isFreehand()  { return _freehand; }
+  function isBoxMode()   { return _boxMode; }
 
   // ── Button label helpers ───────────────────────────────────────────────────
 
@@ -194,6 +243,14 @@ const mprRoi = (() => {
     btn.textContent       = _freehand ? '◼ Stop Brush' : '✏ Brush';
     btn.style.color       = _freehand ? '#ffaa00' : '#ccc';
     btn.style.borderColor = _freehand ? '#ff9900' : '#444';
+  }
+
+  function _updateBoxBtn() {
+    const btn = document.getElementById('mprSegBoxBtn');
+    if (!btn) return;
+    btn.textContent       = _boxMode ? '◼ Stop Box' : '🔲 Seg Box';
+    btn.style.color       = _boxMode ? '#ffcc44' : '#ccc';
+    btn.style.borderColor = _boxMode ? '#ffcc44' : '#444';
   }
 
   // ── Plane helpers ──────────────────────────────────────────────────────────
@@ -270,6 +327,17 @@ const mprRoi = (() => {
   // ── Shared mouse handlers (draw rubber-band + edit drag) ───────────────────
 
   function _onMouseMove(e, canvasId) {
+    // Box mode: update in-progress box endpoint.
+    if (_boxMode && _boxWip && _boxWip.canvasId === canvasId) {
+      const coords = _fromEvent(e, canvasId);
+      if (coords) {
+        _boxWip.ix2 = coords.ix;
+        _boxWip.iy2 = coords.iy;
+        _requestRedraw();
+      }
+      return;
+    }
+
     // Draw mode: update rubber-band endpoint then trigger a clean full re-render.
     // Calling _redrawCanvas() directly would accumulate strokes without clearing;
     // _requestRedraw() → updateAllViews() → _doRender() clears the canvas first.
@@ -317,6 +385,16 @@ const mprRoi = (() => {
   }
 
   function _onMouseDown(e, canvasId) {
+    // Box mode: start a new seg box.
+    if (_boxMode) {
+      e.stopPropagation();
+      const coords = _fromEvent(e, canvasId);
+      if (!coords) return;
+      _boxWip = { canvasId, ix1: coords.ix, iy1: coords.iy, ix2: coords.ix, iy2: coords.iy };
+      _requestRedraw();
+      return;
+    }
+
     // Freehand mode: start a new stroke.
     if (_freehand) {
       e.stopPropagation();
@@ -360,6 +438,16 @@ const mprRoi = (() => {
   }
 
   function _onMouseUp(e, canvasId) {
+    // Box mode: commit the in-progress box.
+    if (_boxMode && _boxWip && _boxWip.canvasId === canvasId) {
+      const w = Math.abs(_boxWip.ix2 - _boxWip.ix1);
+      const h = Math.abs(_boxWip.iy2 - _boxWip.iy1);
+      if (w > 2 && h > 2) _segBoxes[canvasId] = { ..._boxWip };
+      _boxWip = null;
+      _requestRedraw();
+      return;
+    }
+
     // Freehand: close stroke into an ROI.
     if (_freehand && _fhWip && _fhWip.canvasId === canvasId) {
       if (_fhWip.points.length >= 3) _closeFreehand();
@@ -627,6 +715,10 @@ const mprRoi = (() => {
     // Cross-view position lines: show where ROIs from other planes intersect.
     _drawCrossViewIndicators(ctx, canvasId, state);
 
+    // Segmentation bounding boxes (committed + in-progress).
+    if (_segBoxes[canvasId]) _drawSegBox(ctx, _segBoxes[canvasId], state, false);
+    if (_boxWip && _boxWip.canvasId === canvasId) _drawSegBox(ctx, _boxWip, state, true);
+
     // Closed ROIs for this canvas at the current plane position.
     _rois.filter(r => r.canvasId === canvasId && r.planeIndex === plane && r.visible !== false)
          .forEach(r => _drawClosed(ctx, r, state, r.id === _selectedId));
@@ -634,6 +726,33 @@ const mprRoi = (() => {
     // In-progress polygon (draw mode only).
     if (_wip  && _wip.canvasId  === canvasId) _drawWip(ctx, _wip, state);
     if (_fhWip && _fhWip.canvasId === canvasId) _drawFreehandWip(ctx, _fhWip, state);
+  }
+
+  // Draw a segmentation bounding box rectangle on the canvas.
+  function _drawSegBox(ctx, box, state, isWip) {
+    const x1 = state.offX + (Math.min(box.ix1, box.ix2) / state.srcW) * state.drawW;
+    const y1 = state.offY + (Math.min(box.iy1, box.iy2) / state.srcH) * state.drawH;
+    const x2 = state.offX + (Math.max(box.ix1, box.ix2) / state.srcW) * state.drawW;
+    const y2 = state.offY + (Math.max(box.iy1, box.iy2) / state.srcH) * state.drawH;
+    const w  = x2 - x1;
+    const h  = y2 - y1;
+    if (w < 1 || h < 1) return;
+    ctx.save();
+    ctx.strokeStyle = isWip ? 'rgba(255,204,68,0.6)' : '#ffcc44';
+    ctx.fillStyle   = 'rgba(255,204,68,0.07)';
+    ctx.lineWidth   = isWip ? 1 : 1.5;
+    ctx.setLineDash([6, 3]);
+    ctx.fillRect(x1, y1, w, h);
+    ctx.strokeRect(x1, y1, w, h);
+    ctx.setLineDash([]);
+    if (!isWip) {
+      ctx.font         = 'bold 10px sans-serif';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = 'rgba(0,0,0,0.6)';  ctx.fillText('Seg Box', x1 + 5, y1 + 5);
+      ctx.fillStyle    = '#ffcc44cc';          ctx.fillText('Seg Box', x1 + 4, y1 + 4);
+    }
+    ctx.restore();
   }
 
   // Draw thin dashed lines in `canvasId` showing the plane position of every
@@ -1152,6 +1271,7 @@ const mprRoi = (() => {
     redrawAll, getRois,
     deleteRoi, renameRoi, toggleRoiVisibility,
     toggleFreehandMode, isFreehand,
+    toggleBoxMode, isBoxMode, clearSegBoxes, getSegBoxes,
     importRois,
     interpolate, clearInterpolated, getInterpolatable,
   };

@@ -1351,6 +1351,7 @@ def _propagate_from_seed_2d(
     for direction in (1, -1):
         prev = mask_3d[seed_z]
         z    = seed_z + direction
+        gap  = 0          # consecutive slices with no overlap (gap bridging)
         while 0 <= z < nz:
             labeled_2d, border = _label_slice(z)
             overlap = labeled_2d[prev & binary_mask[z]]
@@ -1358,7 +1359,12 @@ def _propagate_from_seed_2d(
             non_brd = valid - border
             use     = non_brd if non_brd else valid
             if not use:
-                break
+                gap += 1
+                if gap > 2:   # tolerate up to 2 consecutive empty slices
+                    break
+                z += direction
+                continue
+            gap  = 0
             best = max(use, key=lambda l: int((labeled_2d == l).sum()))
             mask_3d[z] = (labeled_2d == best)
             prev = mask_3d[z]
@@ -1491,95 +1497,124 @@ def _do_segment_heart(
 
 
 def _do_segment_heart_seeded(
-    vol:           np.ndarray,
-    seed_z:        int,
-    seed_row:      int,
-    seed_col:      int,
-    pixel_spacing: float,
+    vol:            np.ndarray,
+    seed_z:         int,
+    seed_row:       int,
+    seed_col:       int,
+    pixel_spacing:  float,
+    slice_thickness: float,
+    bbox:           "dict | None" = None,
 ) -> np.ndarray:
     """
-    Seed-based heart segmentation using 2-D per-slice propagation.
+    Seed-based heart segmentation.
 
-    The user clicks anywhere inside the heart (myocardium, blood pool, or
-    pericardium) on the axial MPR canvas.  The algorithm:
+    Pipeline
+    --------
+    1.  Build a 3-D bounding-box mask from optional user-drawn boxes in axial
+        and/or coronal/sagittal views.  When provided this tightly constrains
+        the search region so the propagation cannot leak into adjacent structures.
+    2.  Per-slice mediastinum detection: find the two largest lung-air regions
+        per axial slice and keep only the column band between them.
+    3.  AND the two masks with a soft-tissue threshold (−30 to 150 HU) to form
+        the candidate volume.
+    4.  Propagate from seed using 2-D slice-by-slice connected components.
+    5.  Subtract automatically-segmented lung masks (prevents the heart contour
+        from blending into abutting lung tissue on border slices).
+    6.  12 mm per-slice 2-D disk closing + hole fill to smooth the boundary and
+        fill cardiac chambers.
 
-    1. Builds a soft-tissue binary mask: −30 < HU < 200.
-       This captures myocardium (~40-80 HU), cardiac chambers (blood 30-70 HU),
-       pericardium, and great vessels.  Fat is mostly excluded (< −30 HU);
-       bones are excluded (> 200 HU).
-    2. Runs _propagate_from_seed_2d from the seed — the heart is surrounded by
-       lung air on most thoracic slices, so propagation stops naturally at the
-       lung boundary rather than leaking into liver or chest wall.
-    3. Applies 12 mm per-slice 2-D disk closing to smooth the boundary and
-       fill cardiac chambers (especially important on non-contrast CT where
-       chamber blood blends with myocardium).
+    bbox dict keys (all optional, in frontend image coords):
+      axial_ix1/ix2/iy1/iy2      : col/row range in the axial canvas
+      coronal_ix1/ix2/iy1/iy2    : image-x/y range in the coronal canvas
+      sagittal_ix1/ix2/iy1/iy2   : image-x/y range in the sagittal canvas
 
-    Returns heart_mask bool array (nz, nr, nc).
-    Raises ValueError if no soft tissue found near the seed.
+    Coordinate transforms (matching mpr.js conventions):
+      Axial:    ix = col,          iy = row,         planeIndex = z
+      Coronal:  ix = ncols-1-col,  iy = z (slice),   planeIndex = y
+      Sagittal: ix = nrows-1-row,  iy = z (slice),   planeIndex = x
     """
     nz, nr, nc = vol.shape
 
-    # ── Per-slice mediastinum detection ───────────────────────────────────────
-    # The key problem with a plain soft-tissue mask is that muscle, fat, heart,
-    # and liver all form one connected 2-D region — there's no air boundary
-    # between the heart and the chest wall on most slices.
-    #
-    # Fix: for every slice, find the two largest *internal* lung-air components
-    # (2-D connected components of HU < -300, excluding border-touching ones).
-    # The mediastinum is the column band between the two lung fields.  Soft
-    # tissue outside that band (chest wall, subcutaneous tissue) is masked out.
-    # On non-thoracic slices (no lung air visible) candidate is left empty so
-    # propagation stops naturally at the diaphragm / lung apex.
+    # ── 1. Bounding-box mask ──────────────────────────────────────────────────
+    bbox_mask = np.ones((nz, nr, nc), dtype=bool)
+    if bbox:
+        def _apply_ax(k):
+            if all(k + s in bbox for s in ('_ix1', '_ix2', '_iy1', '_iy2')):
+                c0 = int(min(bbox[k + '_ix1'], bbox[k + '_ix2']))
+                c1 = int(max(bbox[k + '_ix1'], bbox[k + '_ix2']))
+                r0 = int(min(bbox[k + '_iy1'], bbox[k + '_iy2']))
+                r1 = int(max(bbox[k + '_iy1'], bbox[k + '_iy2']))
+                m  = np.zeros((nz, nr, nc), dtype=bool)
+                m[:, r0:r1 + 1, c0:c1 + 1] = True
+                return m
+            return None
 
+        def _apply_cor(k):
+            if all(k + s in bbox for s in ('_ix1', '_ix2', '_iy1', '_iy2')):
+                # coronal: ix = ncols-1-col, iy = z
+                ix1 = int(min(bbox[k + '_ix1'], bbox[k + '_ix2']))
+                ix2 = int(max(bbox[k + '_ix1'], bbox[k + '_ix2']))
+                iy1 = int(min(bbox[k + '_iy1'], bbox[k + '_iy2']))
+                iy2 = int(max(bbox[k + '_iy1'], bbox[k + '_iy2']))
+                c0  = max(0, nc - 1 - ix2);  c1 = min(nc, nc - 1 - ix1 + 1)
+                z0  = max(0, iy1);            z1 = min(nz, iy2 + 1)
+                m   = np.zeros((nz, nr, nc), dtype=bool)
+                m[z0:z1, :, c0:c1] = True
+                return m
+            return None
+
+        def _apply_sag(k):
+            if all(k + s in bbox for s in ('_ix1', '_ix2', '_iy1', '_iy2')):
+                # sagittal: ix = nrows-1-row, iy = z
+                ix1 = int(min(bbox[k + '_ix1'], bbox[k + '_ix2']))
+                ix2 = int(max(bbox[k + '_ix1'], bbox[k + '_ix2']))
+                iy1 = int(min(bbox[k + '_iy1'], bbox[k + '_iy2']))
+                iy2 = int(max(bbox[k + '_iy1'], bbox[k + '_iy2']))
+                r0  = max(0, nr - 1 - ix2);  r1 = min(nr, nr - 1 - ix1 + 1)
+                z0  = max(0, iy1);            z1 = min(nz, iy2 + 1)
+                m   = np.zeros((nz, nr, nc), dtype=bool)
+                m[z0:z1, r0:r1, :] = True
+                return m
+            return None
+
+        for fn, key in [(_apply_ax, 'axial'), (_apply_cor, 'coronal'), (_apply_sag, 'sagittal')]:
+            m = fn(key)
+            if m is not None:
+                bbox_mask &= m
+
+    # ── 2. Per-slice mediastinum detection ────────────────────────────────────
     def _mediastinum_slice(z):
-        """
-        Returns a 2-D bool array (nr, nc) of the mediastinum on slice z.
-        Returns False everywhere on non-thoracic slices so propagation stops.
-
-        Key insight: lungs often touch the FOV border, so we cannot just exclude
-        ALL border-touching air components (that removes the lungs too).  Instead
-        we remove only the SINGLE LARGEST border-touching component, which is
-        virtually always the external air outside the body.  Smaller components
-        that happen to clip the FOV border are kept as lung candidates.
-        """
         air = vol[z] < -300
         labeled_2d, n = ndi.label(air)
         if n == 0:
             return np.zeros((nr, nc), dtype=bool)
 
         sizes = {lbl: int((labeled_2d == lbl).sum()) for lbl in range(1, n + 1)}
-
-        # Find border-touching labels, then drop only the LARGEST one (external air).
         border = set()
         for edge in (labeled_2d[0], labeled_2d[-1],
                      labeled_2d[:, 0], labeled_2d[:, -1]):
             border.update(map(int, np.unique(edge)))
         border.discard(0)
-
         if border:
             ext_lbl = max(border, key=lambda l: sizes.get(l, 0))
-            sizes.pop(ext_lbl, None)     # remove external air; keep everything else
+            sizes.pop(ext_lbl, None)
 
-        # Need at least two remaining regions large enough to be lungs.
-        min_lung_px = max(100, nr * nc // 2000)   # ~130 px on 512×512
+        min_lung_px = max(100, nr * nc // 2000)
         candidates  = {l: s for l, s in sizes.items() if s >= min_lung_px}
         if len(candidates) < 2:
-            return np.zeros((nr, nc), dtype=bool)   # can't locate two lungs → stop
+            return np.zeros((nr, nc), dtype=bool)
 
-        top2  = sorted(candidates, key=lambda l: -candidates[l])[:2]
+        top2   = sorted(candidates, key=lambda l: -candidates[l])[:2]
         cols_A = np.where((labeled_2d == top2[0]).any(axis=0))[0]
         cols_B = np.where((labeled_2d == top2[1]).any(axis=0))[0]
         if cols_A.size == 0 or cols_B.size == 0:
             return np.zeros((nr, nc), dtype=bool)
 
         mean_A, mean_B = float(cols_A.mean()), float(cols_B.mean())
-
-        # Smaller mean col → patient's right (right lung); larger → left lung.
         if mean_A < mean_B:
             c_start, c_end = int(cols_A.max()), int(cols_B.min())
         else:
             c_start, c_end = int(cols_B.max()), int(cols_A.min())
-
         if c_start >= c_end:
             mid = (c_start + c_end) // 2
             c_start, c_end = max(0, mid - 30), min(nc, mid + 30)
@@ -1588,22 +1623,50 @@ def _do_segment_heart_seeded(
         med[:, c_start:c_end] = True
         return med
 
-    # Build per-slice candidate mask: soft tissue (−30 to 150 HU) inside mediastinum
+    # ── 3. Candidate mask = soft tissue ∩ mediastinum ∩ bbox ─────────────────
     candidate = np.zeros((nz, nr, nc), dtype=bool)
     for z in range(nz):
+        if not bbox_mask[z].any():
+            continue
         med = _mediastinum_slice(z)
         if not med.any():
-            continue                          # non-thoracic slice → leave False
+            continue
         slc_soft = (vol[z] > -30) & (vol[z] < 150)
-        candidate[z] = slc_soft & med
+        candidate[z] = slc_soft & med & bbox_mask[z]
 
+    # ── 4. Propagate from seed ────────────────────────────────────────────────
     raw = _propagate_from_seed_2d(candidate, seed_z, seed_row, seed_col, pixel_spacing)
     if raw is None:
+        if bbox:
+            raise ValueError(
+                "No cardiac soft tissue found near the seed point inside the drawn box. "
+                "Make sure the seed click and the box both cover the heart region."
+            )
         raise ValueError(
             "No cardiac soft tissue found near the seed point. "
-            "Click inside the heart — the bright gray region between the two lungs "
-            "on the axial view (not on the lungs or chest wall)."
+            "Click inside the heart — the gray region between the two lungs on axial view."
         )
+
+    # ── 5. Subtract lung volumes ──────────────────────────────────────────────
+    # Auto-detect lungs and remove them from the heart mask.  This prevents
+    # the contour from bleeding into abutting lung parenchyma on boundary slices.
+    try:
+        seed_l, seed_r = _find_auto_lung_seeds(vol)
+        lm, rm = _do_segment_lungs(vol, seed_l, seed_r,
+                                   pixel_spacing, slice_thickness)
+        raw = raw & ~(lm | rm)
+        # If subtraction emptied the mask (shouldn't happen, but be safe), restore
+        if not raw.any():
+            raw = _propagate_from_seed_2d(candidate, seed_z, seed_row, seed_col,
+                                          pixel_spacing)
+    except Exception:
+        pass   # lung auto-detection failed → skip subtraction, keep raw mask
+
+    if raw is None or not raw.any():
+        raise ValueError("Heart mask became empty after lung subtraction. "
+                         "Try placing the seed more centrally inside the heart.")
+
+    # ── 6. 12 mm per-slice closing + hole fill ────────────────────────────────
     r_xy = max(2, round(12.0 / float(pixel_spacing)))
     return _close_mask_2d(raw, r_xy)
 
@@ -1739,12 +1802,17 @@ async def segment_heart(payload: dict = Body(...)):
     Body:
       {
         "series_uid": "",
-        "seed": [slice_idx, col, row]   ← image-pixel space (axial MPR)
+        "seed": [slice_idx, col, row],   ← image-pixel space (axial MPR)
+        "bbox": {                         ← optional bounding boxes (image coords)
+          "axial_ix1": N, "axial_ix2": N, "axial_iy1": N, "axial_iy2": N,
+          "coronal_ix1": N, ..., "sagittal_ix1": N, ...
+        }
       }
     Response: { "heart": [{"slice": z, "points": [[col,row],...]},...] }
     """
     series_uid = payload.get("series_uid", "")
-    s = payload.get("seed", [])
+    s    = payload.get("seed", [])
+    bbox = payload.get("bbox") or {}
     if len(s) != 3:
         raise HTTPException(
             status_code=422,
@@ -1759,7 +1827,11 @@ async def segment_heart(payload: dict = Body(...)):
         if vol is None:
             return None
         psp = float(meta[0]["ps"][0])
-        hm = _do_segment_heart_seeded(vol, seed_z, seed_row, seed_col, psp)
+        st  = float(meta[0]["slice_thickness"])
+        hm  = _do_segment_heart_seeded(
+            vol, seed_z, seed_row, seed_col, psp, st,
+            bbox=bbox if bbox else None,
+        )
         return {"heart": _mask_to_contours(hm)}
 
     try:

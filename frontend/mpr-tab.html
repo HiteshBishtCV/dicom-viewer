@@ -183,6 +183,18 @@
           title="Click inside the heart on the axial view to segment it">
           ❤ Segment Heart
         </button>
+        <button id="mprSegBoxBtn" onclick="mprRoi.toggleBoxMode()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;"
+          title="Draw a bounding box on any view to constrain heart segmentation (draw on axial + coronal or sagittal)">
+          🔲 Seg Box
+        </button>
+        <button onclick="mprRoi.clearSegBoxes()"
+          style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
+                 font-weight:600;background:#2a2a2a;color:#555;border:1px solid #333;"
+          title="Clear all segmentation bounding boxes">
+          ✕ Clear Box
+        </button>
         <button onclick="cancelSegPicker()"
           style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
                  font-weight:600;background:#2a2a2a;color:#555;border:1px solid #333;"
