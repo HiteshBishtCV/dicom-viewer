@@ -70,6 +70,7 @@ const mprRoi = (() => {
   let _dragState  = null;   // { canvasId, roiId, vertexIdx }
   let _segBoxes   = {};     // { canvasId: {ix1, iy1, ix2, iy2} } — committed seg boxes
   let _boxWip     = null;   // { canvasId, ix1, iy1, ix2, iy2 } — in-progress box
+  let _mouseIm    = {};     // { canvasId: {ix, iy} } — last image-space mouse position
 
   // ── Init ───────────────────────────────────────────────────────────────────
 
@@ -327,6 +328,15 @@ const mprRoi = (() => {
   // ── Shared mouse handlers (draw rubber-band + edit drag) ───────────────────
 
   function _onMouseMove(e, canvasId) {
+    // Always track image-space cursor position for the HU overlay.
+    const _coords = _fromEvent(e, canvasId);
+    if (_coords) {
+      _mouseIm[canvasId] = { ix: _coords.ix, iy: _coords.iy };
+      _requestRedraw();
+    } else {
+      delete _mouseIm[canvasId];
+    }
+
     // Box mode: update in-progress box endpoint.
     if (_boxMode && _boxWip && _boxWip.canvasId === canvasId) {
       const coords = _fromEvent(e, canvasId);
@@ -465,9 +475,10 @@ const mprRoi = (() => {
   }
 
   function _onMouseLeave(canvasId) {
+    delete _mouseIm[canvasId];
+    _requestRedraw();
     if (_drawing && _wip && _wip.canvasId === canvasId) {
       _wip.mousePos = null;
-      _requestRedraw();
     }
     if (_editing && _dragState && _dragState.canvasId === canvasId) {
       const roi = _rois.find(r => r.id === _dragState.roiId);
@@ -715,6 +726,9 @@ const mprRoi = (() => {
     // Cross-view position lines: show where ROIs from other planes intersect.
     _drawCrossViewIndicators(ctx, canvasId, state);
 
+    // HU value overlay at cursor position (top-left corner).
+    _drawHUOverlay(ctx, canvasId, state);
+
     // Segmentation bounding boxes (committed + in-progress).
     if (_segBoxes[canvasId]) _drawSegBox(ctx, _segBoxes[canvasId], state, false);
     if (_boxWip && _boxWip.canvasId === canvasId) _drawSegBox(ctx, _boxWip, state, true);
@@ -726,6 +740,48 @@ const mprRoi = (() => {
     // In-progress polygon (draw mode only).
     if (_wip  && _wip.canvasId  === canvasId) _drawWip(ctx, _wip, state);
     if (_fhWip && _fhWip.canvasId === canvasId) _drawFreehandWip(ctx, _fhWip, state);
+  }
+
+  // Look up the HU value for image coords (ix, iy) on the given canvas.
+  // Returns null if mprVolume is unavailable or coords are out of bounds.
+  function _huAt(canvasId, ix, iy) {
+    if (typeof mprVolume === 'undefined' || !mprVolume) return null;
+    const { buffer, rows, cols, slices } = mprVolume;
+    let z, row, col;
+    if (canvasId === 'axialCanvas') {
+      col = Math.round(ix);  row = Math.round(iy);  z = (typeof zIndex !== 'undefined') ? zIndex : 0;
+    } else if (canvasId === 'coronalCanvas') {
+      col = Math.round(cols - 1 - ix);  row = (typeof yIndex !== 'undefined') ? yIndex : 0;  z = Math.round(iy);
+    } else if (canvasId === 'sagittalCanvas') {
+      row = Math.round(rows - 1 - ix);  col = (typeof xIndex !== 'undefined') ? xIndex : 0;  z = Math.round(iy);
+    } else {
+      return null;
+    }
+    if (z < 0 || z >= slices || row < 0 || row >= rows || col < 0 || col >= cols) return null;
+    return buffer[z * rows * cols + row * cols + col];
+  }
+
+  // Draw the HU value and cursor image coords in the top-left corner of the canvas.
+  function _drawHUOverlay(ctx, canvasId, state) {
+    const pos = _mouseIm[canvasId];
+    if (!pos) return;
+    const hu = _huAt(canvasId, pos.ix, pos.iy);
+    if (hu === null) return;
+
+    const text = `HU: ${Math.round(hu)}`;
+    const x = state.offX + 6;
+    const y = state.offY + 6;
+
+    ctx.save();
+    ctx.font         = 'bold 12px monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    // Dark shadow for legibility on any background.
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillText(text, x + 1, y + 1);
+    ctx.fillStyle = '#ffff66';
+    ctx.fillText(text, x, y);
+    ctx.restore();
   }
 
   // Draw a segmentation bounding box rectangle on the canvas.
