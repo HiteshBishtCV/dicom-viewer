@@ -256,9 +256,16 @@ def _load_ct_slices(frame_ref_uid: str) -> list[dict]:
     """
     Scan UPLOAD_DIR for CT/MR slices whose FrameOfReferenceUID matches the
     RTSTRUCT.  Returns one dict per slice with the tags needed for the
-    coordinate transform, sorted by ascending slice position along the
-    image normal (so index 0 = most inferior/posterior depending on patient
-    orientation).
+    coordinate transform.
+
+    Sorted by InstanceNumber ascending — the same order used by the frontend
+    loadSeries() function.  This ensures that slice_index N in the backend
+    corresponds to currentIndex N in the frontend regardless of whether the
+    scanner acquired superior→inferior or inferior→superior.
+
+    (A geometry-based sort on dot(IPP, normal) was used previously but caused
+    a complete reversal on scanners where InstanceNumber increases
+    superior→inferior, because that order is opposite to ascending z-position.)
     """
     slices = []
     for fname in os.listdir(UPLOAD_DIR):
@@ -285,18 +292,8 @@ def _load_ct_slices(frame_ref_uid: str) -> list[dict]:
         except Exception:
             continue
 
-    if not slices:
-        return slices
-
-    # Sort by position along the slice-normal direction so index matches
-    # the clinical stack order used by the MPR volume builder (z descending).
-    # We derive the normal from the first slice's ImageOrientationPatient.
-    iop0   = slices[0]["iop"]
-    F_row  = iop0[:3]          # direction cosines of the row  axis
-    F_col  = iop0[3:]          # direction cosines of the col  axis
-    normal = _norm(_cross(F_row, F_col))   # normal = F_row × F_col
-
-    slices.sort(key=lambda s: _dot(s["ipp"], normal))
+    # Match frontend sort: InstanceNumber ascending.
+    slices.sort(key=lambda s: s["instance"])
     return slices
 
 
@@ -361,7 +358,7 @@ def parse_rtstruct_pixels(struct_path: str) -> dict:
 
     # ── Build coordinate transform from first slice ───────────────────────────
     # All slices share the same IOP and PixelSpacing for a standard acquisition.
-    # Use the first (most inferior) slice as the reference for F_row, F_col, N.
+    # Use the first slice (lowest InstanceNumber) as the reference for IOP/spacing.
     iop0       = ct_slices[0]["iop"]
     F_row      = iop0[:3]                       # unit vec along columns
     F_col      = iop0[3:]                       # unit vec along rows
@@ -376,7 +373,7 @@ def parse_rtstruct_pixels(struct_path: str) -> dict:
         """
         Convert patient-space point (mm) → (row, col, slice_index).
         row and col are floating-point sub-pixel positions; round for display.
-        slice_index is the index into ct_slices (0 = most inferior).
+        slice_index is the index into ct_slices (sorted by InstanceNumber ascending).
         """
         p    = [x, y, z]
 
