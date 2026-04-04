@@ -19,6 +19,7 @@ cornerstoneWADOImageLoader.webWorkerManager.initialize({
 });
 
 cornerstone.enable(element);
+roiDraw.init(element);   // inject ROI overlay canvas after Cornerstone creates its own
 
 cornerstoneTools.external.cornerstone = cornerstone;
 cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
@@ -49,6 +50,9 @@ element.addEventListener('cornerstoneimagerendered', function() {
   // RTSTRUCT contour overlay — currentIndex matches backend slice_index for
   // standard axial CT (both ordered ascending by InstanceNumber / z-position).
   drawRtstructOverlay(element, currentIndex);
+
+  // Re-project completed ROI polygons onto the updated viewport.
+  roiDraw.redraw();
 });
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -75,6 +79,7 @@ function displayImage(index) {
     }
 
     cornerstone.displayImage(element, image, currentViewport);
+    roiDraw.setSlice(index);
     updateSliceLabel(index, currentImageIds.length);
     updateWLDisplay(
       Math.round(currentViewport.voi.windowCenter),
@@ -100,6 +105,7 @@ let dragStartWC  = 0;
 
 element.addEventListener('mousedown', function(e) {
   if (!currentImageIds.length) return;
+  if (roiDraw.isDrawing()) return;   // let ROI canvas handle all events in draw mode
   isDragging  = true;
   dragStartX  = e.clientX;
   dragStartY  = e.clientY;
@@ -441,6 +447,18 @@ function activateRtstruct(series) {
       infoPanel.innerHTML =
         `<p style="color:#f88;padding:8px">Failed to load RTSTRUCT: ${err.message}</p>`;
     });
+}
+
+// ── ROI draw mode toggle ──────────────────────────────────────────────────────
+
+function toggleRoiDraw() {
+  const active = roiDraw.toggleDrawMode();
+  const btn = document.getElementById('roiDrawBtn');
+  if (btn) {
+    btn.textContent    = active ? '◼ Stop Drawing' : '✏ Draw ROI';
+    btn.style.color    = active ? '#ffb74d' : '#ccc';
+    btn.style.borderColor = active ? '#ffb74d' : '#444';
+  }
 }
 
 // updateRtLegend() is defined in rtstruct-overlay.js (needs direct access to

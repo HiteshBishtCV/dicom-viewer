@@ -55,6 +55,22 @@
       border-radius: 2px; cursor: pointer; background: none; flex-shrink: 0;
     }
 
+    #roiDrawBtn {
+      width: 512px; padding: 6px 0; border-radius: 4px; cursor: pointer;
+      font-size: 13px; font-weight: 600; background: #2a2a2a;
+      color: #ccc; border: 1px solid #444;
+    }
+    #roiDrawBtn:hover { background: #3a3a3a; color: #fff; }
+
+    #roiPanel {
+      margin-top: 10px; padding-top: 8px; border-top: 1px solid #333;
+    }
+    #roiPanel h5 {
+      font-size: 12px; color: #888; margin-bottom: 6px; font-weight: 600;
+      letter-spacing: 0.5px; text-transform: uppercase;
+    }
+    #roiList { display: flex; flex-direction: column; gap: 1px; }
+
     #mprBtnGroup {
       display: none; width: 512px; gap: 6px;
     }
@@ -162,6 +178,7 @@
       <div id="modeIndicator" style="font-size:12px;color:#aaa;margin-top:2px;">
         ↕ Scroll mode &nbsp;(middle-click to switch)
       </div>
+      <button id="roiDrawBtn" onclick="toggleRoiDraw()">✏ Draw ROI</button>
       <div id="mprBtnGroup">
         <button id="mprCpuBtn" onclick="openMPRTab('cpu')">⊞ MPR — CPU</button>
         <button id="mprGpuBtn" onclick="openMPRTab('gpu')">⊞ MPR — GPU</button>
@@ -175,6 +192,10 @@
       <div id="metaContent"></div>
       <div class="wl-display">
         WL: <span id="meta-wc">—</span> &nbsp;|&nbsp; WW: <span id="meta-ww">—</span>
+      </div>
+      <div id="roiPanel">
+        <h5>ROIs</h5>
+        <div id="roiList"><div style="color:#555;font-size:12px;padding:2px 0">No ROIs drawn</div></div>
       </div>
     </div>
   </div>
@@ -224,6 +245,7 @@
   <script src="gpu-slice.js"></script>
   <script src="mpr.js"></script>
   <script src="rtstruct-overlay.js"></script>
+  <script src="roi-draw.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
