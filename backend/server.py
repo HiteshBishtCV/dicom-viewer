@@ -1872,51 +1872,71 @@ async def segment_heart(payload: dict = Body(...)):
 
 @app.get("/check-totalseg")
 def check_totalseg():
-    """Return whether TotalSegmentator is installed and its version."""
+    """Return whether TotalSegmentator is installed, its version, and GPU info."""
+    info = {"installed": False, "version": None, "gpu": None}
     try:
         import totalsegmentator
-        ver = getattr(totalsegmentator, "__version__", "unknown")
-        return {"installed": True, "version": ver}
+        info["installed"] = True
+        info["version"]   = getattr(totalsegmentator, "__version__", "unknown")
     except ImportError:
-        return {"installed": False, "version": None}
+        pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            info["gpu"] = {
+                "name":      torch.cuda.get_device_name(0),
+                "memory_mb": props.total_memory // (1024 * 1024),
+            }
+    except Exception:
+        pass
+    return info
 
 
-@app.post("/ml-segment")
-async def ml_segment(payload: dict = Body(...)):
-    """
-    Run TotalSegmentator (fast CPU mode) to segment Heart, Left Lung, Right Lung.
+# ── ML segmentation job store ─────────────────────────────────────────────────
+# Jobs are keyed by UUID; each entry: {status, pct, stage, result, error}
+_ml_jobs: dict = {}
 
-    Body: { "series_uid": "...", "fast": true }
-    Response: {
-      "Heart":       [{slice, points}, ...],
-      "Left Lung":   [...],
-      "Right Lung":  [...],
-      "saved_file":  "ml_seg_<timestamp>.json"
-    }
+def _ml_set(job_id: str, **kw):
+    if job_id in _ml_jobs:
+        _ml_jobs[job_id].update(kw)
 
-    Requires:  pip install TotalSegmentator
-    First run downloads ~300 MB of model weights to ~/.totalsegmentator/.
-    """
-    series_uid = payload.get("series_uid", "")
-    fast       = bool(payload.get("fast", True))
 
-    def _run():
-        # ── Import dependencies ───────────────────────────────────────────────
+def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
+    """Heavy work executed in a background thread. Updates _ml_jobs[job_id]."""
+    import time as _time
+
+    def _upd(pct, stage):
+        _ml_set(job_id, pct=pct, stage=stage)
+
+    try:
+        # ── 1. Import dependencies ────────────────────────────────────────────
+        _upd(2, "Checking dependencies…")
         try:
             import SimpleITK as sitk
         except ImportError:
             raise RuntimeError(
-                "SimpleITK not found. Install TotalSegmentator which pulls it in: "
-                "pip install TotalSegmentator"
+                "SimpleITK not found — install with:  pip install TotalSegmentator"
             )
         try:
             from totalsegmentator.python_api import totalsegmentator as ts_run
         except ImportError:
             raise RuntimeError(
-                "TotalSegmentator not installed. Run:  pip install TotalSegmentator"
+                "TotalSegmentator not installed — run:  pip install TotalSegmentator"
             )
 
-        # ── Collect DICOM files for the series ───────────────────────────────
+        # ── 2. Detect GPU ─────────────────────────────────────────────────────
+        device = "cpu"
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = "gpu"
+        except Exception:
+            pass
+        gpu_label = "GPU" if device == "gpu" else "CPU"
+
+        # ── 3. Collect DICOM files ────────────────────────────────────────────
+        _upd(5, f"Scanning DICOM files [{gpu_label}]…")
         entries = []
         for fname in os.listdir(UPLOAD_DIR):
             fpath = os.path.join(UPLOAD_DIR, fname)
@@ -1934,71 +1954,81 @@ async def ml_segment(payload: dict = Body(...)):
         entries.sort(key=lambda x: x[0])
         fpaths = [p for _, p in entries]
 
-        # ── Build SimpleITK image from sorted DICOM files ─────────────────────
+        # ── 4. Build SimpleITK image ──────────────────────────────────────────
+        _upd(12, f"Loading {len(fpaths)} slices…")
         reader = sitk.ImageSeriesReader()
         reader.SetFileNames(fpaths)
         ct_img = reader.Execute()
 
-        # ── Run TotalSegmentator ──────────────────────────────────────────────
-        import tempfile, pathlib
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ts_run(
-                ct_img,
-                pathlib.Path(tmpdir),
-                fast=fast,
-                task="total",
-                quiet=True,
-                device="cpu",
-            )
-            seg_path = os.path.join(tmpdir, "segmentation.nii.gz")
-            if not os.path.exists(seg_path):
-                # Some versions write the seg differently
-                nii_files = [f for f in os.listdir(tmpdir) if f.endswith(".nii.gz")]
-                if not nii_files:
-                    raise RuntimeError("TotalSegmentator produced no output file.")
-                seg_path = os.path.join(tmpdir, nii_files[0])
-            seg_img = sitk.ReadImage(seg_path)
+        # ── 5. Run TotalSegmentator ───────────────────────────────────────────
+        mode_str = "fast" if fast else "full quality"
+        _upd(20, f"Running TotalSegmentator ({mode_str}, {gpu_label})…")
 
-        seg_arr = sitk.GetArrayFromImage(seg_img)   # (nz, nr, nc) int16
+        import tempfile, pathlib, threading
 
-        # ── Find label IDs from TotalSegmentator's class map ─────────────────
+        # While TS runs, advance the bar slowly so the UI isn't frozen.
+        # We'll jump to 82% when inference finishes.
+        stop_ticker = threading.Event()
+        def _ticker():
+            pct = 20
+            while not stop_ticker.is_set():
+                _time.sleep(1.5)
+                pct = min(pct + (3 if device == "gpu" else 1), 80)
+                _upd(pct, f"TotalSegmentator inference ({mode_str}, {gpu_label})…")
+        t = threading.Thread(target=_ticker, daemon=True)
+        t.start()
+
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                ts_run(
+                    ct_img,
+                    pathlib.Path(tmpdir),
+                    fast=fast,
+                    task="total",
+                    quiet=True,
+                    device=device,
+                )
+                seg_path = os.path.join(tmpdir, "segmentation.nii.gz")
+                if not os.path.exists(seg_path):
+                    nii_files = [f for f in os.listdir(tmpdir) if f.endswith(".nii.gz")]
+                    if not nii_files:
+                        raise RuntimeError("TotalSegmentator produced no output file.")
+                    seg_path = os.path.join(tmpdir, nii_files[0])
+                seg_img = sitk.ReadImage(seg_path)
+                seg_arr = sitk.GetArrayFromImage(seg_img)   # (nz, nr, nc)
+        finally:
+            stop_ticker.set()
+            t.join(timeout=2)
+
+        # ── 6. Look up label IDs ──────────────────────────────────────────────
+        _upd(82, "Extracting organ masks…")
         try:
             from totalsegmentator.map_to_binary import class_map
             cmap = class_map.get("total", {})
             if not cmap:
-                # Some versions store it under a different key
-                for k in class_map:
-                    cmap = class_map[k]
-                    if cmap:
-                        break
+                for v in class_map.values():
+                    if v:
+                        cmap = v; break
         except Exception:
             cmap = {}
 
-        # inv: name → label_id
         inv = {name: lid for lid, name in cmap.items()}
-
-        # Structures we want
         WANT = {
             "Heart":      [v for k, v in inv.items() if k == "heart"],
             "Left Lung":  [v for k, v in inv.items() if "lung" in k and "left"  in k],
             "Right Lung": [v for k, v in inv.items() if "lung" in k and "right" in k],
         }
-
-        # Fallback hard-coded IDs if class_map lookup failed (TotalSegmentator v1/v2)
-        FALLBACK = {
-            "Heart":      [52],
-            "Left Lung":  [13, 14],
-            "Right Lung": [15, 16, 17],
-        }
+        FALLBACK = {"Heart": [52], "Left Lung": [13, 14], "Right Lung": [15, 16, 17]}
         for name in WANT:
             if not WANT[name]:
                 WANT[name] = FALLBACK[name]
 
-        # ── Build masks + contours ────────────────────────────────────────────
-        COLORS = {"Heart": "#ef5350", "Left Lung": "#4fc3f7", "Right Lung": "#81c784"}
-        results = {}
+        # ── 7. Build contours ─────────────────────────────────────────────────
+        _upd(88, "Building contours…")
+        COLORS   = {"Heart": "#ef5350", "Left Lung": "#4fc3f7", "Right Lung": "#81c784"}
+        results  = {}
         roi_list = []
-        ts_now = int(__import__("time").time() * 1000)
+        ts_now   = int(_time.time() * 1000)
 
         for name, label_ids in WANT.items():
             mask = np.zeros(seg_arr.shape, dtype=bool)
@@ -2006,7 +2036,6 @@ async def ml_segment(payload: dict = Body(...)):
                 mask |= (seg_arr == lid)
             contours = _mask_to_contours(mask)
             results[name] = contours
-
             color = COLORS.get(name, "#ffcc44")
             for c in contours:
                 roi_list.append({
@@ -2021,26 +2050,53 @@ async def ml_segment(payload: dict = Body(...)):
                     "planeIndex": c["slice"],
                 })
 
-        # ── Auto-save ROIs to backend ─────────────────────────────────────────
-        import time as _time
+        # ── 8. Save to disk ───────────────────────────────────────────────────
+        _upd(96, "Saving ROI file…")
         ts_str = _time.strftime("%Y%m%d_%H%M%S")
-        fname  = f"ml_seg_{ts_str}.json"
-        fpath  = os.path.join(ROI_SAVE_DIR, fname)
-        with open(fpath, "w") as fh:
+        save_fname = f"ml_seg_{ts_str}.json"
+        with open(os.path.join(ROI_SAVE_DIR, save_fname), "w") as fh:
             json.dump({"rois": roi_list, "source": "ml-segment"}, fh)
 
-        results["saved_file"] = fname
-        results["roi_list"]   = roi_list   # for postMessage to MPR tab
-        return results
+        results["saved_file"] = save_fname
+        results["roi_list"]   = roi_list
 
-    try:
-        result = await asyncio.to_thread(_run)
-    except RuntimeError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"ML segmentation error: {e}")
+        _ml_set(job_id, pct=100, stage="Done!", status="done", result=results)
 
-    return result
+    except Exception as exc:
+        _ml_set(job_id, status="error", stage="Failed", error=str(exc))
+
+
+@app.post("/ml-segment-start")
+async def ml_segment_start(payload: dict = Body(...)):
+    """
+    Start a TotalSegmentator job in the background.
+    Returns immediately with a job_id; poll /ml-segment-status/{job_id}.
+
+    Body: { "series_uid": "...", "fast": true }
+    """
+    import uuid
+    # Evict old jobs (keep 20 most recent).
+    if len(_ml_jobs) >= 20:
+        for old in list(_ml_jobs)[:len(_ml_jobs) - 19]:
+            _ml_jobs.pop(old, None)
+
+    job_id = str(uuid.uuid4())
+    _ml_jobs[job_id] = {"status": "running", "pct": 0, "stage": "Starting…",
+                        "result": None, "error": None}
+
+    series_uid = payload.get("series_uid", "")
+    fast       = bool(payload.get("fast", True))
+    asyncio.create_task(asyncio.to_thread(_ml_run_sync, job_id, series_uid, fast))
+    return {"job_id": job_id}
+
+
+@app.get("/ml-segment-status/{job_id}")
+async def ml_segment_status(job_id: str):
+    """Poll the status of a running ML segmentation job."""
+    job = _ml_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 @app.get("/")

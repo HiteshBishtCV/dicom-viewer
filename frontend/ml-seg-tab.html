@@ -57,9 +57,8 @@
     #progressWrap { display: none; margin-top: 12px; }
     #progressBar {
       height: 4px; border-radius: 4px; background: #4fc3f7;
-      width: 0%; transition: width .4s; animation: pulse 1.5s ease-in-out infinite;
+      width: 0%; transition: width .8s ease, background .4s;
     }
-    @keyframes pulse { 0%,100%{opacity:.7} 50%{opacity:1} }
     #statusMsg {
       font-size: 12px; color: #aaa; margin-top: 8px;
       padding: 6px 10px; background: #1a1a1a; border-radius: 4px;
@@ -105,7 +104,10 @@
 <body>
 
   <h2>🤖 AI Organ Segmentation</h2>
-  <div class="subtitle" id="seriesInfo">Powered by TotalSegmentator · fast CPU mode</div>
+  <div class="subtitle" id="seriesInfo">Powered by TotalSegmentator</div>
+  <div id="gpuBadge" style="display:none;font-size:11px;font-weight:700;
+       padding:3px 10px;border-radius:4px;border:1px solid;
+       letter-spacing:0.5px;margin-bottom:14px;"></div>
 
   <!-- Install notice (shown if TotalSegmentator not installed) -->
   <div id="installNotice">
