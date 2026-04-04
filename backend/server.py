@@ -1317,8 +1317,12 @@ def _propagate_from_seed_2d(
     nz, nr, nc = binary_mask.shape
     r_px       = max(10, round(20.0 / float(pixel_spacing)))
 
+    # 8-connectivity so diagonal touches don't split blobs (important for
+    # cardiac tissue where chambers meet at corners).
+    _conn8 = np.ones((3, 3), dtype=bool)
+
     def _label_slice(z):
-        labeled_2d, _ = ndi.label(binary_mask[z])
+        labeled_2d, _ = ndi.label(binary_mask[z], structure=_conn8)
         border = set()
         for edge in (labeled_2d[0], labeled_2d[-1],
                      labeled_2d[:, 0], labeled_2d[:, -1]):
@@ -1356,17 +1360,18 @@ def _propagate_from_seed_2d(
             labeled_2d, border = _label_slice(z)
             overlap = labeled_2d[prev & binary_mask[z]]
             valid   = set(map(int, overlap)) - {0}
-            non_brd = valid - border
-            use     = non_brd if non_brd else valid
-            if not use:
+            if not valid:
                 gap += 1
                 if gap > 2:   # tolerate up to 2 consecutive empty slices
                     break
                 z += direction
                 continue
-            gap  = 0
-            best = max(use, key=lambda l: int((labeled_2d == l).sum()))
-            mask_3d[z] = (labeled_2d == best)
+            gap = 0
+            # Accept ALL components that touch the previous slice — not just the
+            # largest.  This keeps cardiac chambers together (left + right
+            # ventricle, aortic root) which are separate connected blobs on many
+            # CT slices but anatomically part of the same structure.
+            mask_3d[z] = np.isin(labeled_2d, list(valid))
             prev = mask_3d[z]
             z   += direction
 
@@ -1635,28 +1640,23 @@ def _do_segment_heart_seeded(
         med[:, c_start:c_end] = True
         return med
 
-    # ── 4. Candidate mask = adaptive tissue ∩ mediastinum ∩ bbox ────────────
-    # When the user drew a bbox the region is already constrained, so we use
-    # mediastinum detection as an optional refinement and fall back to bbox-
-    # only for slices where mediastinum detection returns empty (e.g. lung
-    # not visible on that slice).
+    # ── 4. Candidate mask ────────────────────────────────────────────────────
+    # Rule: when the user drew a bbox, trust it completely — skip mediastinum.
+    # The mediastinum column band can exclude the heart at apex/base slices
+    # and is unnecessary when the user has already constrained the region.
+    # Without bbox, add mediastinum to prevent chest-wall leakage.
+    tissue    = (vol >= hu_lo) & (vol <= hu_hi)
     has_bbox  = bool(bbox)
     candidate = np.zeros((nz, nr, nc), dtype=bool)
     for z in range(nz):
         if not bbox_mask[z].any():
             continue
-        slc_soft = (vol[z] >= hu_lo) & (vol[z] <= hu_hi)
-        med = _mediastinum_slice(z)
         if has_bbox:
-            if med.any():
-                candidate[z] = slc_soft & med & bbox_mask[z]
-            else:
-                # Mediastinum detection failed for this slice — fall back to bbox only
-                candidate[z] = slc_soft & bbox_mask[z]
+            candidate[z] = tissue[z] & bbox_mask[z]
         else:
-            if not med.any():
-                continue
-            candidate[z] = slc_soft & med
+            med = _mediastinum_slice(z)
+            if med.any():
+                candidate[z] = tissue[z] & med
 
     # ── 5. Propagate from seed ────────────────────────────────────────────────
     raw = _propagate_from_seed_2d(candidate, seed_z, seed_row, seed_col, pixel_spacing)
