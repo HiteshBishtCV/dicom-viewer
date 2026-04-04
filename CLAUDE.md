@@ -69,6 +69,9 @@ pip install fastapi uvicorn pydicom python-multipart
 - ROI store (`roiStore`) uses canonical `[[x,y]]` point format; `roi-draw.js` uses `{x,y}` objects internally for Cornerstone's `pixelToCanvas`
 - ROI save: `POST /save-roi` accepts `{ rois: [{name, slice, points, ...}] }`; files written to `backend/saved_rois/roi_<timestamp>.json`; `GET /load-roi/` lists files; `GET /load-roi/{filename}` returns one record
 - `roi-save.js` is decoupled — reads only from `roiStore`, has no direct dependency on `roi-draw.js` or `mpr-roi.js`
+- ROI edit mode (`roi-draw.js`): `toggleEditMode()` / `isEditing()`; click-to-select (point-in-polygon), vertex drag (mousedown→mousemove→mouseup), Delete key deletes selected; modes are mutually exclusive
+- ROI load (`roi-draw.js`): `importRois(array)` converts `[[x,y]]` → `{x,y}`, deduplicates by id, syncs roiStore, redraws — aligned to CT because points are already in image-pixel coords
+- Glue code for load UI lives in `app.js` (`showRoiLoadPicker`, `loadSelectedRoi`, `toggleRoiEdit`); `roi-save.js` stays pure I/O
 
 ## GPU Rendering Notes
 

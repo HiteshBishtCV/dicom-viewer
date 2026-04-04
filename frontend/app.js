@@ -105,7 +105,7 @@ let dragStartWC  = 0;
 
 element.addEventListener('mousedown', function(e) {
   if (!currentImageIds.length) return;
-  if (roiDraw.isDrawing()) return;   // let ROI canvas handle all events in draw mode
+  if (roiDraw.isDrawing() || roiDraw.isEditing()) return;   // let ROI canvas handle events
   isDragging  = true;
   dragStartX  = e.clientX;
   dragStartY  = e.clientY;
@@ -473,6 +473,9 @@ function openStructPanel() {
 // ── ROI draw mode toggle ──────────────────────────────────────────────────────
 
 function toggleRoiDraw() {
+  // If edit mode is on, turn it off first so the button states stay consistent.
+  if (roiDraw.isEditing()) _setEditBtn(false);
+
   const active = roiDraw.toggleDrawMode();
   const btn = document.getElementById('roiDrawBtn');
   if (btn) {
@@ -480,6 +483,65 @@ function toggleRoiDraw() {
     btn.style.color       = active ? '#ffb74d' : '#ccc';
     btn.style.borderColor = active ? '#ffb74d' : '#444';
   }
+}
+
+// ── ROI edit mode toggle ──────────────────────────────────────────────────────
+
+function toggleRoiEdit() {
+  // If draw mode is on, reset its button first.
+  if (roiDraw.isDrawing()) {
+    const drawBtn = document.getElementById('roiDrawBtn');
+    if (drawBtn) {
+      drawBtn.textContent       = '✏ Draw ROI';
+      drawBtn.style.color       = '#ccc';
+      drawBtn.style.borderColor = '#444';
+    }
+  }
+
+  const active = roiDraw.toggleEditMode();
+  _setEditBtn(active);
+}
+
+function _setEditBtn(active) {
+  const btn = document.getElementById('roiEditBtn');
+  if (!btn) return;
+  btn.textContent       = active ? '◼ Stop Editing' : '✎ Edit ROI';
+  btn.style.color       = active ? '#80cbc4' : '#ccc';
+  btn.style.borderColor = active ? '#4db6ac' : '#444';
+}
+
+// ── ROI load picker ───────────────────────────────────────────────────────────
+
+async function showRoiLoadPicker() {
+  const select = document.getElementById('roiFileSelect');
+  const files  = await roiSave.loadList();
+
+  if (!files.length) {
+    alert('No saved ROI files found on the backend.');
+    return;
+  }
+
+  select.innerHTML =
+    '<option value="">— select file —</option>' +
+    files.map(f => `<option value="${f}">${f}</option>`).join('');
+
+  select.style.display = select.style.display === 'none' ? 'block' : 'none';
+}
+
+async function loadSelectedRoi() {
+  const select   = document.getElementById('roiFileSelect');
+  const filename = select.value;
+  if (!filename) return;
+
+  const record = await roiSave.load(filename);
+  if (!record || !Array.isArray(record.rois)) {
+    alert('Failed to load ROI file.');
+    return;
+  }
+
+  roiDraw.importRois(record.rois);
+  select.style.display = 'none';
+  select.value         = '';
 }
 
 // updateRtLegend() is defined in rtstruct-overlay.js (needs direct access to

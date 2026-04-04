@@ -75,6 +75,22 @@ Available in both the 2D viewer and MPR view.
 - **Structures panel** — lists all ROIs with an inline rename input, slice/plane position, and a delete button
 - Points stored in image-pixel coordinates and re-projected each frame so ROIs stay aligned through zoom and pan
 
+#### Edit mode
+
+- **"✎ Edit ROI" button** — activates edit mode (mutually exclusive with draw mode)
+- **Click inside a polygon** — selects it; selected ROI shows a white dashed ring and larger vertex handles
+- **Drag a vertex handle** — moves that vertex in real-time; committed to `roiStore` on mouse-up
+- **Delete / Backspace** — removes the selected ROI
+- **Click empty space** — deselects
+- Changing slice clears selection; drag commit fires on mouse-leave too (no lost edits)
+
+#### Load from backend
+
+- **"↓ Load ROIs" button** — fetches saved file list from `GET /load-roi/`, shows an inline `<select>`
+- Selecting a file calls `GET /load-roi/{filename}` and imports ROIs via `roiDraw.importRois()`
+- Deduplicates by `id` so re-loading the same file is safe
+- Loaded ROIs render on the correct slice immediately and persist through scroll/zoom
+
 ---
 
 ### 2D Viewer
@@ -251,9 +267,16 @@ dicom-viewer/
 
 ## Changelog
 
+### ROI load + edit
+- `roi-draw.js`: `importRois(array)` — converts backend `[[x,y]]` → internal `{x,y}`, deduplicates by id, syncs to `roiStore`
+- `roi-draw.js`: `toggleEditMode()` / `isEditing()` — click-to-select, vertex drag, Delete key, white dashed ring + large handles on selection
+- `app.js`: `showRoiLoadPicker()` / `loadSelectedRoi()` — fetches file list, shows `<select>`, calls `roiDraw.importRois()`
+- `app.js`: `toggleRoiEdit()` — wires Edit button with mutual exclusion against draw mode
+- `index.html`: "✎ Edit ROI", "↓ Load ROIs" buttons + `<select id="roiFileSelect">` in Structures panel
+
 ### ROI save / load
 - `backend/server.py`: `POST /save-roi`, `GET /load-roi/`, `GET /load-roi/{filename}` — JSON file storage in `saved_rois/`
-- `frontend/roi-save.js`: `roiSave.save()` POSTs full `roiStore` payload; `loadList()` / `load(filename)` for future retrieval
+- `frontend/roi-save.js`: `roiSave.save()` POSTs full `roiStore` payload; `loadList()` / `load(filename)` for retrieval
 - "↑ Save ROIs" button added to Structures panel
 
 ### ROI naming

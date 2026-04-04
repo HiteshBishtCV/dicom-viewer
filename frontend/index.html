@@ -223,12 +223,29 @@
       <div class="sp-section">
         <div class="sp-hdr">Drawn ROIs</div>
         <button id="roiDrawBtn" onclick="toggleRoiDraw()">✏ Draw ROI</button>
+        <button id="roiEditBtn" onclick="toggleRoiEdit()"
+                style="padding:5px 0;border-radius:4px;cursor:pointer;font-size:12px;
+                       font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;width:100%;"
+                title="Select ROI to move vertices or delete">
+          ✎ Edit ROI
+        </button>
         <button id="roiSaveBtn" onclick="roiSave.save()"
                 style="padding:5px 0;border-radius:4px;cursor:pointer;font-size:12px;
                        font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;width:100%;"
                 title="Save all drawn ROIs to backend (JSON)">
           ↑ Save ROIs
         </button>
+        <button id="roiLoadBtn" onclick="showRoiLoadPicker()"
+                style="padding:5px 0;border-radius:4px;cursor:pointer;font-size:12px;
+                       font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;width:100%;"
+                title="Load previously saved ROIs from backend">
+          ↓ Load ROIs
+        </button>
+        <select id="roiFileSelect" onchange="loadSelectedRoi()"
+                style="display:none;width:100%;background:#1a1a1a;color:#ccc;
+                       border:1px solid #444;border-radius:3px;padding:3px;font-size:11px;">
+          <option value="">— select file —</option>
+        </select>
         <div id="drawnRoiList">
           <div class="sp-empty">No ROIs drawn</div>
         </div>
