@@ -355,15 +355,21 @@ Algorithm:
 - **Per-slice 2D disk closing** with **15 mm physical radius** fills lung nodules (bright ~−100 to +100 HU spots) — 10-100× faster than 3D closing, sub-second on typical CT
 - `scipy.ndimage.binary_fill_holes` removes any remaining interior holes
 
-#### Heart segmentation (automatic)
+#### Heart segmentation (seed + optional bounding boxes)
 
-Click **❤ Segment Heart** — no seed point needed.
+1. Optionally draw bounding boxes to constrain the search region:
+   - Click **🔲 Seg Box** to enter box mode, then **click and drag** on any canvas to draw a dashed yellow rectangle
+   - Draw on axial canvas to constrain row/col range; draw on coronal or sagittal to constrain the Z (slice) range
+   - Click **✕ Clear Box** to remove all boxes and start over
+2. Click **❤ Segment Heart** → click inside the heart on the axial canvas
 
 Algorithm:
+- Applies bounding box constraints from any drawn boxes to exclude anatomy outside the region of interest
 - Auto-locates lungs using **2D connected-component analysis** with border removal and a multi-threshold fallback (−300/−200/−100 HU) for robust detection across different CT protocols
 - Builds a per-slice **mediastinum mask** (column band between the two lung boundaries)
-- Thresholds 0–150 HU inside the mediastinum, excluding lung voxels
-- Selects the largest connected component
+- Thresholds −30 to 150 HU inside the mediastinum ∩ bbox, excluding lung voxels
+- Propagates from the user seed using 2D per-slice connected-component selection (same engine as lung segmentation)
+- Subtracts auto-detected lung volumes to remove overlap
 - 12 mm per-slice 2D closing + per-slice hole fill (fills cardiac chambers on non-contrast CT)
 - Note: may include aortic root / pulmonary vessels — edit contours manually if needed
 
