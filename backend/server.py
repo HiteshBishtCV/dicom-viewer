@@ -483,6 +483,62 @@ def get_rtstruct_pixels(path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/rtstruct/slices/")
+def get_rtstruct_slices(path: str):
+    """
+    Return RTSTRUCT contours grouped by slice, then by ROI — ready for the
+    frontend to iterate without any client-side reshaping.
+
+    Internally calls parse_rtstruct_pixels(), then pivots the per-ROI list
+    into a slice-keyed dict so the renderer can look up all ROIs on a given
+    slice in O(1).
+
+    Query param:
+      path — server-side path to the RTSTRUCT .dcm file
+             (returned by /upload/ as series.metadata.path)
+
+    Response:
+      {
+        "slices": {
+          "slice_45": [
+            { "name": "GTV", "number": 1, "points": [[row, col], ...] },
+            { "name": "PTV", "number": 2, "points": [[row, col], ...] }
+          ],
+          "slice_46": [ ... ]
+        },
+        "ct": {
+          "slice_count": 125,
+          "rows": 512, "cols": 512,
+          "pixel_spacing": [0.977, 0.977],
+          "slice_spacing": 3.0
+        }
+      }
+    """
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    try:
+        data = parse_rtstruct_pixels(path)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Pivot: per-ROI contour list → slice-keyed dict of ROI entries.
+    # A single ROI may have multiple contours on the same slice (e.g. islands);
+    # they are kept as separate entries so the frontend can draw each polygon.
+    slices: dict[str, list] = {}
+    for roi in data["rois"]:
+        for contour in roi["contours"]:
+            key = f"slice_{contour['slice_index']}"
+            slices.setdefault(key, []).append({
+                "name":   roi["name"],
+                "number": roi["number"],
+                "points": contour["points"],
+            })
+
+    return {"slices": slices, "ct": data["ct"]}
+
+
 @app.get("/")
 def root():
     return {"message": "Server is running"}
