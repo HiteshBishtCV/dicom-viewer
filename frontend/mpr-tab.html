@@ -171,10 +171,10 @@
           title="Click two seed points (left lung, right lung) to auto-segment both lungs">
           🫁 Segment Lungs
         </button>
-        <button id="mprSegHeartBtn" onclick="runHeartSegmentation()"
+        <button id="mprSegHeartBtn" onclick="startHeartSeedPicker()"
           style="padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;
                  font-weight:600;background:#2a2a2a;color:#ccc;border:1px solid #444;"
-          title="Automatically segment the heart (runs lung detection internally)">
+          title="Click inside the heart on the axial view to segment it">
           ❤ Segment Heart
         </button>
         <button onclick="cancelSegPicker()"

@@ -249,6 +249,10 @@ function _handleSeedClick(e) {
     _detachSeedListener();
     _clearPreviewRois();
     _runLungSegmentation(_segSeedLeft, seed);
+  } else if (_segPickState === 'heart') {
+    _segPickState = null;
+    _detachSeedListener();
+    _runHeartSegmentation(seed);
   }
 }
 
@@ -375,16 +379,26 @@ async function _runLungSegmentation(seedLeft, seedRight) {
   }
 }
 
-/** POST /segment-heart and import results. */
-async function runHeartSegmentation() {
+/** Start the one-click seed-picking flow for heart segmentation. */
+function startHeartSeedPicker() {
   if (typeof mprRoi === 'undefined') return;
+  _segPickState = 'heart';
+  _segStatus('Click inside the HEART on the axial view (bright gray region in centre of chest).', '#ef5350');
   _segBtnDisable(true);
-  _segStatus('Segmenting heart… (auto-detects lungs first, may take ~10 s)', '#ef5350');
+  _attachSeedListener();
+}
+
+/** POST /segment-heart with seed and import results. */
+async function _runHeartSegmentation(seed) {
+  _segStatus('Segmenting heart… (may take a few seconds)', '#ef5350');
   try {
     const res = await fetch(`${SEG_API}/segment-heart`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ series_uid: window._mprSeriesUid ?? '' }),
+      body:    JSON.stringify({
+        series_uid: window._mprSeriesUid ?? '',
+        seed: [seed.slice, seed.col, seed.row],
+      }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));

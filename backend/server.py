@@ -1288,39 +1288,37 @@ def _mask_to_contours(mask: np.ndarray, n_points: int = 96) -> list:
     return out
 
 
-# ── Lung segmentation ──────────────────────────────────────────────────────────
+# ── Shared 2-D propagation helper ─────────────────────────────────────────────
 
-def _segment_one_lung_2d(
-    vol: np.ndarray,
+def _propagate_from_seed_2d(
+    binary_mask: np.ndarray,
     seed_z: int, seed_row: int, seed_col: int,
     pixel_spacing: float,
 ) -> "np.ndarray | None":
     """
-    Extract one lung mask using 2-D per-slice propagation.
+    General 2-D per-slice connected-component propagation from a seed point.
 
-    Avoids 3-D labeling entirely, so the two lungs (connected in 3-D via the
-    trachea/carina) always remain separate regions.  Also avoids the failure
-    mode where a lung touching the FOV border gets deleted by the global
-    external-air removal step.
+    Works on any pre-computed binary mask (e.g. air mask for lungs, soft-tissue
+    mask for heart).  Avoids 3-D labeling so structures connected only through
+    narrow 3-D bridges (trachea, great vessels) remain separated.
 
     Algorithm
     ---------
-    1. On the seed slice, do 2-D connected components on the air mask.
-       Try to pick a non-border-touching label first; fall back to any label
-       if the lung clips the FOV edge.
+    1. On the seed slice, run 2-D connected components on binary_mask[seed_z].
+       Prefer non-border-touching labels; fall back to border-touching if none
+       found internally (handles structures that clip the FOV edge).
     2. Search a 20 mm neighbourhood around (seed_row, seed_col) to tolerate
-       clicks on nodules / vessels.
-    3. Propagate the selected region upward and downward one slice at a time:
-       on each new slice find the 2-D component(s) that overlap the previous
-       slice's mask, and keep the largest.
-    4. Returns bool array (nz, nr, nc), or None if no air found near the seed.
+       off-centre clicks.
+    3. Propagate up and down: each new slice finds the 2-D component that
+       overlaps the previous slice's mask (largest wins); stops when no overlap.
+
+    Returns bool array (nz, nr, nc), or None if nothing found near the seed.
     """
-    nz, nr, nc  = vol.shape
-    air_mask    = vol < -300
-    r_px        = max(10, round(20.0 / float(pixel_spacing)))
+    nz, nr, nc = binary_mask.shape
+    r_px       = max(10, round(20.0 / float(pixel_spacing)))
 
     def _label_slice(z):
-        labeled_2d, _ = ndi.label(air_mask[z])
+        labeled_2d, _ = ndi.label(binary_mask[z])
         border = set()
         for edge in (labeled_2d[0], labeled_2d[-1],
                      labeled_2d[:, 0], labeled_2d[:, -1]):
@@ -1329,23 +1327,19 @@ def _segment_one_lung_2d(
         return labeled_2d, border
 
     def _pick_label(labeled_2d, border, row, col):
-        """Return the best label in the neighbourhood; prefer non-border."""
         r0 = max(0, row - r_px);  r1 = min(nr, row + r_px + 1)
         c0 = max(0, col - r_px);  c1 = min(nc, col + r_px + 1)
         sub = labeled_2d[r0:r1, c0:c1].ravel()
-        # Prefer internal labels (non-border)
         internal = sub[(sub > 0) & ~np.isin(sub, list(border))]
         if internal.size:
             vals, counts = np.unique(internal, return_counts=True)
             return int(vals[np.argmax(counts)])
-        # Fallback: any non-zero label (handles lungs touching FOV edge)
         any_label = sub[sub > 0]
         if any_label.size:
             vals, counts = np.unique(any_label, return_counts=True)
             return int(vals[np.argmax(counts)])
         return 0
 
-    # Step 1-2: find seed label on the seed slice
     labeled_seed, border_seed = _label_slice(seed_z)
     lbl = _pick_label(labeled_seed, border_seed, seed_row, seed_col)
     if lbl == 0:
@@ -1354,14 +1348,12 @@ def _segment_one_lung_2d(
     mask_3d = np.zeros((nz, nr, nc), dtype=bool)
     mask_3d[seed_z] = (labeled_seed == lbl)
 
-    # Step 3: propagate up and down
     for direction in (1, -1):
         prev = mask_3d[seed_z]
         z    = seed_z + direction
         while 0 <= z < nz:
             labeled_2d, border = _label_slice(z)
-            overlap = labeled_2d[prev & air_mask[z]]
-            # Prefer non-border overlapping labels; fall back to any overlapping
+            overlap = labeled_2d[prev & binary_mask[z]]
             valid   = set(map(int, overlap)) - {0}
             non_brd = valid - border
             use     = non_brd if non_brd else valid
@@ -1373,6 +1365,17 @@ def _segment_one_lung_2d(
             z   += direction
 
     return mask_3d if mask_3d.any() else None
+
+
+# ── Lung segmentation ──────────────────────────────────────────────────────────
+
+def _segment_one_lung_2d(
+    vol: np.ndarray,
+    seed_z: int, seed_row: int, seed_col: int,
+    pixel_spacing: float,
+) -> "np.ndarray | None":
+    """Thin wrapper: propagate from seed using air mask (HU < −300)."""
+    return _propagate_from_seed_2d(vol < -300, seed_z, seed_row, seed_col, pixel_spacing)
 
 
 def _do_segment_lungs(
@@ -1485,6 +1488,44 @@ def _do_segment_heart(
     # 5 — per-slice closing + hole fill
     r_xy = max(2, round(12.0 / float(pixel_spacing)))
     return _close_mask_2d(heart_raw, r_xy)
+
+
+def _do_segment_heart_seeded(
+    vol:           np.ndarray,
+    seed_z:        int,
+    seed_row:      int,
+    seed_col:      int,
+    pixel_spacing: float,
+) -> np.ndarray:
+    """
+    Seed-based heart segmentation using 2-D per-slice propagation.
+
+    The user clicks anywhere inside the heart (myocardium, blood pool, or
+    pericardium) on the axial MPR canvas.  The algorithm:
+
+    1. Builds a soft-tissue binary mask: −30 < HU < 200.
+       This captures myocardium (~40-80 HU), cardiac chambers (blood 30-70 HU),
+       pericardium, and great vessels.  Fat is mostly excluded (< −30 HU);
+       bones are excluded (> 200 HU).
+    2. Runs _propagate_from_seed_2d from the seed — the heart is surrounded by
+       lung air on most thoracic slices, so propagation stops naturally at the
+       lung boundary rather than leaking into liver or chest wall.
+    3. Applies 12 mm per-slice 2-D disk closing to smooth the boundary and
+       fill cardiac chambers (especially important on non-contrast CT where
+       chamber blood blends with myocardium).
+
+    Returns heart_mask bool array (nz, nr, nc).
+    Raises ValueError if no soft tissue found near the seed.
+    """
+    soft_tissue = (vol > -30) & (vol < 200)
+    raw = _propagate_from_seed_2d(soft_tissue, seed_z, seed_row, seed_col, pixel_spacing)
+    if raw is None:
+        raise ValueError(
+            "No soft tissue found near the heart seed point. "
+            "Click inside the heart — the bright gray region in the centre of the chest."
+        )
+    r_xy = max(2, round(12.0 / float(pixel_spacing)))
+    return _close_mask_2d(raw, r_xy)
 
 
 # ── Segmentation endpoints ─────────────────────────────────────────────────────
@@ -1608,29 +1649,37 @@ async def segment_lungs(payload: dict = Body(...)):
 @app.post("/segment-heart")
 async def segment_heart(payload: dict = Body(...)):
     """
-    Automatically segment the heart (no seed required).
+    Segment the heart using a single user-provided seed point.
 
-    Internally auto-locates the lungs using 2-D connected-component analysis
-    on multiple axial slices (tries HU thresholds −300, −200, −100 to be
-    robust across CT protocols), then locates the mediastinum between the
-    two lung fields and extracts the dominant soft-tissue structure there.
+    The user clicks anywhere inside the heart (myocardium, blood pool, or
+    pericardium) on the axial MPR canvas.  A soft-tissue mask (−30 to 200 HU)
+    is propagated from that seed slice-by-slice; the result is closed with a
+    12 mm disk to smooth boundaries and fill cardiac chambers.
 
-    Body: { "series_uid": "" }
+    Body:
+      {
+        "series_uid": "",
+        "seed": [slice_idx, col, row]   ← image-pixel space (axial MPR)
+      }
     Response: { "heart": [{"slice": z, "points": [[col,row],...]},...] }
     """
     series_uid = payload.get("series_uid", "")
+    s = payload.get("seed", [])
+    if len(s) != 3:
+        raise HTTPException(
+            status_code=422,
+            detail="seed must be [slice_idx, col, row] — click inside the heart on the axial view",
+        )
+
+    # Frontend: [slice, col, row] → numpy: (z, row, col)
+    seed_z, seed_row, seed_col = int(s[0]), int(s[2]), int(s[1])
 
     def _run():
         vol, meta = _load_ct_volume(series_uid)
         if vol is None:
             return None
-        ps  = meta[0]["ps"]
-        psp = float(ps[0])
-
-        seed_l, seed_r = _find_auto_lung_seeds(vol)
-        st = meta[0]["slice_thickness"]
-        lm, rm = _do_segment_lungs(vol, seed_l, seed_r, psp, st)
-        hm = _do_segment_heart(vol, lm, rm, psp)
+        psp = float(meta[0]["ps"][0])
+        hm = _do_segment_heart_seeded(vol, seed_z, seed_row, seed_col, psp)
         return {"heart": _mask_to_contours(hm)}
 
     try:
