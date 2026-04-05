@@ -3227,6 +3227,21 @@ async def ml_segment_status(job_id: str):
 
 # ── ROI → 3D binary field mask ─────────────────────────────────────────────────
 
+def _field_central_slice(field_mask: np.ndarray) -> int:
+    """
+    Return the z-index of the central slice of the tangential field.
+
+    Steps:
+      1. Find every z-slice that contains at least one True voxel.
+      2. Return the middle index of that range (integer division).
+
+    Returns 0 if the mask is empty.
+    """
+    active = np.where(field_mask.any(axis=(1, 2)))[0]
+    if len(active) == 0:
+        return 0
+    return int(active[len(active) // 2])
+
 def _polygon_to_mask(points: list, rows: int, cols: int) -> np.ndarray:
     """
     Rasterise a polygon given as [[col, row], ...] into a (rows, cols) bool mask.
@@ -3406,11 +3421,12 @@ async def roi_field_mask(payload: dict = Body(...)):
     np.save(filepath, field_mask.astype(np.uint8))
 
     return {
-        "shape":               list(field_mask.shape),
-        "annotated_slices":    annotated_count,
-        "interpolated_slices": max(0, interpolated_count),
-        "voxel_count":         voxel_count,
-        "saved_file":          filename,
+        "shape":                list(field_mask.shape),
+        "annotated_slices":     annotated_count,
+        "interpolated_slices":  max(0, interpolated_count),
+        "voxel_count":          voxel_count,
+        "central_slice_index":  _field_central_slice(field_mask),
+        "saved_file":           filename,
     }
 
 
@@ -3544,11 +3560,12 @@ async def field_organ_overlap(payload: dict = Body(...)):
     heart_stats  = _organ_field_stats(heart_mask, field_mask, voxel_vol_cc) if heart_mask is not None else None
 
     return {
-        "lung":            lung_stats,
-        "heart":           heart_stats,
-        "field_volume_cc": field_vol_cc,
-        "voxel_volume_cc": round(voxel_vol_cc, 6),
-        "spacing_mm":      [round(dz, 4), round(dy, 4), round(dx, 4)],
+        "lung":                lung_stats,
+        "heart":               heart_stats,
+        "field_volume_cc":     field_vol_cc,
+        "central_slice_index": _field_central_slice(field_mask),
+        "voxel_volume_cc":     round(voxel_vol_cc, 6),
+        "spacing_mm":          [round(dz, 4), round(dy, 4), round(dx, 4)],
     }
 
 
@@ -3704,11 +3721,12 @@ async def field_organ_stats(payload: dict = Body(...)):
     field_vol_cc = round(int(field_mask.sum()) * voxel_vol_cc, 2)
 
     return {
-        "lung":            lung_stats,
-        "heart":           heart_stats,
-        "field_volume_cc": field_vol_cc,
-        "voxel_volume_cc": round(voxel_vol_cc, 6),
-        "spacing_mm":      [round(dz, 4), round(dy, 4), round(dx, 4)],
+        "lung":                lung_stats,
+        "heart":               heart_stats,
+        "field_volume_cc":     field_vol_cc,
+        "central_slice_index": _field_central_slice(field_mask),
+        "voxel_volume_cc":     round(voxel_vol_cc, 6),
+        "spacing_mm":          [round(dz, 4), round(dy, 4), round(dx, 4)],
     }
 
 

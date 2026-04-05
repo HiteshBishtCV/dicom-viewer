@@ -489,7 +489,8 @@ async function generateFieldMask() {
       `<b>Shape:</b> ${nz} × ${nr} × ${nc}&ensp;` +
       `<b>Annotated:</b> ${data.annotated_slices} slices&ensp;` +
       `<b>Interpolated:</b> ${data.interpolated_slices} slices&ensp;` +
-      `<b>Voxels:</b> ${data.voxel_count.toLocaleString()}`;
+      `<b>Voxels:</b> ${data.voxel_count.toLocaleString()}&ensp;` +
+      `<b>Central slice:</b> ${data.central_slice_index}`;
 
     // Wire download link directly to backend
     const dlLink = document.getElementById('fmDownloadLink');

@@ -116,8 +116,9 @@ async function computeStats() {
 
 function _showResults(data, showLung, showHeart) {
   // Field summary
-  document.getElementById('fieldVolume').textContent = data.field_volume_cc ?? '—';
-  document.getElementById('voxelVol').textContent    = data.voxel_volume_cc ?? '—';
+  document.getElementById('fieldVolume').textContent   = data.field_volume_cc ?? '—';
+  document.getElementById('centralSlice').textContent  = data.central_slice_index ?? '—';
+  document.getElementById('voxelVol').textContent      = data.voxel_volume_cc ?? '—';
   const sp = data.spacing_mm ?? [];
   document.getElementById('spacingTxt').textContent  =
     sp.length === 3 ? `${sp[0]} × ${sp[1]} × ${sp[2]} mm` : '—';
