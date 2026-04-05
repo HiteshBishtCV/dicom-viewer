@@ -3730,6 +3730,172 @@ async def field_organ_stats(payload: dict = Body(...)):
     }
 
 
+# ── Central Lung Distance (CLD) ───────────────────────────────────────────────
+
+def _compute_cld(
+    lung_mask:  np.ndarray,   # bool  (nz, nrows, ncols)
+    field_mask: np.ndarray,   # bool  (nz, nrows, ncols)
+    central_z:  int,          # z-slice index to evaluate
+    dx:         float,        # mm per pixel along columns  (physical x)
+    dy:         float,        # mm per pixel along rows     (physical y)
+    beam_dir:   list,         # 2-element vector [bx, by] in physical mm space
+) -> dict:
+    """
+    Compute Central Lung Distance (CLD) at a given axial slice.
+
+    Definition
+    ----------
+    CLD = the maximum distance any lung-in-field pixel lies from the
+    field edge along the beam direction on the central tangential slice.
+    It quantifies how deeply the tangential beam penetrates the lung.
+
+    Coordinate conventions
+    ----------------------
+    - Images are indexed (row, col) in NumPy order.
+    - Physical x maps to column index:  x_mm = col * dx
+    - Physical y maps to row    index:  y_mm = row * dy
+    - beam_dir = [bx, by] is expressed in the same (x_mm, y_mm) space.
+      Example: a beam travelling purely left→right has bx > 0, by = 0.
+    - beam_dir does NOT need to be pre-normalised; normalisation is done
+      here to avoid caller errors.
+
+    Projection formula
+    ------------------
+    For each pixel (col, row) that lies inside both the lung and the field:
+
+        dist = bx_hat * (col * dx)  +  by_hat * (row * dy)
+
+    where (bx_hat, by_hat) is the unit vector of beam_dir.
+
+    CLD is the maximum value of dist over all such pixels.  The origin
+    of the projection is the image corner (col=0, row=0); the absolute
+    value is not clinically significant — only the relative spread of
+    lung-in-field pixels along the beam axis matters.  If the caller
+    wants a distance measured from the field edge instead, subtract the
+    minimum projection of the field boundary pixels (not done here).
+
+    Returns
+    -------
+    {
+      "cld_mm":               float — CLD in millimetres (0.0 if no overlap),
+      "central_z":            int   — slice index used,
+      "lung_in_field_pixels": int   — pixel count of lung ∩ field on that slice,
+    }
+    """
+    # ── 2-D masks at the central slice ────────────────────────────────────────
+    lung_2d   = lung_mask[central_z]   # (nrows, ncols) bool
+    field_2d  = field_mask[central_z]  # (nrows, ncols) bool
+    overlap   = lung_2d & field_2d
+
+    n_pixels = int(overlap.sum())
+    if n_pixels == 0:
+        return {"cld_mm": 0.0, "central_z": central_z, "lung_in_field_pixels": 0}
+
+    # ── Normalise beam direction ──────────────────────────────────────────────
+    bx, by = float(beam_dir[0]), float(beam_dir[1])
+    mag    = math.sqrt(bx * bx + by * by)
+    if mag == 0.0:
+        raise ValueError("beam_dir must be a non-zero vector")
+    bx_hat, by_hat = bx / mag, by / mag
+
+    # ── Pixel positions in physical mm space ─────────────────────────────────
+    # np.where returns (row_array, col_array) for every True pixel.
+    row_idx, col_idx = np.where(overlap)
+
+    # Physical coordinates
+    x_mm = col_idx.astype(np.float32) * dx   # column → x
+    y_mm = row_idx.astype(np.float32) * dy   # row    → y
+
+    # Scalar projection onto beam unit vector
+    projections = bx_hat * x_mm + by_hat * y_mm
+
+    cld_mm = float(projections.max())
+
+    return {
+        "cld_mm":               round(cld_mm, 3),
+        "central_z":            central_z,
+        "lung_in_field_pixels": n_pixels,
+    }
+
+
+@app.post("/field-cld")
+async def field_cld(payload: dict = Body(...)):
+    """
+    Compute the Central Lung Distance (CLD) for a tangential treatment field.
+
+    Body:
+      {
+        "series_uid":     "...",
+        "rois":           [ {name, slice, points, ...} ],
+        "field_roi_name": "ROI_1",
+        "lung_roi_names": ["Left Lung", "Right Lung"],
+        "beam_direction": [bx, by],       // 2D vector in physical mm space
+        "spacing":        [dz, dy, dx],   // mm — optional, auto-read from CT
+      }
+
+    Returns:
+      {
+        "cld_mm":               float,  // Central Lung Distance in mm
+        "central_slice_index":  int,
+        "lung_in_field_pixels": int,
+        "beam_direction_hat":   [bx_hat, by_hat],  // normalised input vector
+        "spacing_mm":           [dz, dy, dx]
+      }
+    """
+    series_uid = payload.get("series_uid",     "")
+    rois       = payload.get("rois",            [])
+    field_name = payload.get("field_roi_name",  "")
+    lung_names = payload.get("lung_roi_names",  [])
+    beam_dir   = payload.get("beam_direction",  None)
+
+    if not rois:
+        raise HTTPException(422, "'rois' list is required")
+    if not field_name:
+        raise HTTPException(422, "'field_roi_name' is required")
+    if not lung_names:
+        raise HTTPException(422, "'lung_roi_names' is required")
+    if not beam_dir or len(beam_dir) != 2:
+        raise HTTPException(422, "'beam_direction' must be a 2-element [bx, by] vector")
+
+    # ── CT volume dimensions + spacing ───────────────────────────────────────
+    vol, _slices = await asyncio.to_thread(_load_ct_volume, series_uid)
+    if vol is None:
+        raise HTTPException(422, "No CT volume found — upload DICOM first")
+    nz, nrows, ncols = vol.shape
+    del vol
+
+    spacing = payload.get("spacing")
+    if spacing and len(spacing) == 3:
+        dz, dy, dx = float(spacing[0]), float(spacing[1]), float(spacing[2])
+    else:
+        dz, dy, dx = await asyncio.to_thread(_read_voxel_spacing, series_uid)
+
+    # ── Build masks in parallel ───────────────────────────────────────────────
+    field_mask, lung_mask = await asyncio.gather(
+        asyncio.to_thread(_rois_to_mask, rois, [field_name], nz, nrows, ncols),
+        asyncio.to_thread(_rois_to_mask, rois, lung_names,   nz, nrows, ncols),
+    )
+
+    if not field_mask.any():
+        raise HTTPException(422, f"Field ROI '{field_name}' produced an empty mask")
+
+    # ── Central slice + CLD ───────────────────────────────────────────────────
+    central_z = _field_central_slice(field_mask)
+    result    = _compute_cld(lung_mask, field_mask, central_z, dx, dy, beam_dir)
+
+    # Normalised beam vector for reference
+    bx, by = float(beam_dir[0]), float(beam_dir[1])
+    mag    = math.sqrt(bx * bx + by * by)
+
+    return {
+        "cld_mm":               result["cld_mm"],
+        "central_slice_index":  result["central_z"],
+        "lung_in_field_pixels": result["lung_in_field_pixels"],
+        "beam_direction_hat":   [round(bx / mag, 6), round(by / mag, 6)],
+        "spacing_mm":           [round(dz, 4), round(dy, 4), round(dx, 4)],
+    }
+
+
 @app.get("/")
 def root():
     return {"message": "Server is running"}

@@ -67,11 +67,8 @@ async function computeStats() {
   const fieldName = document.getElementById('fieldSelect').value;
   if (!fieldName) { alert('Select a Treatment Field ROI first.'); return; }
 
-  // Collect selected lung names (multi-select).
   const lungSel   = document.getElementById('lungSelect');
-  const lungNames = [...lungSel.options]
-    .filter(o => o.selected).map(o => o.value);
-
+  const lungNames = [...lungSel.options].filter(o => o.selected).map(o => o.value);
   const heartName = document.getElementById('heartSelect').value;
 
   if (!lungNames.length && !heartName) {
@@ -79,30 +76,49 @@ async function computeStats() {
     return;
   }
 
-  _setStatus('Computing… (rasterising contours + SDT interpolation)', '#4fc3f7');
+  const bx = parseFloat(document.getElementById('beamBx').value) || 0;
+  const by = parseFloat(document.getElementById('beamBy').value) || 0;
+  const hasCld = lungNames.length > 0 && (bx !== 0 || by !== 0);
+
+  _setStatus('Computing… (rasterising + SDT interpolation)', '#4fc3f7');
   document.getElementById('computeBtn').disabled = true;
   document.getElementById('resultsCard').style.display = 'none';
 
   try {
-    const res = await fetch(`${API}/field-organ-overlap`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        series_uid:     _seriesUid,
-        rois:           _allRois,
-        field_roi_name: fieldName,
-        lung_roi_names: lungNames,
-        heart_roi_name: heartName,
-      }),
-    });
+    const baseBody = {
+      series_uid:     _seriesUid,
+      rois:           _allRois,
+      field_roi_name: fieldName,
+      lung_roi_names: lungNames,
+      heart_roi_name: heartName,
+    };
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail ?? `HTTP ${res.status}`);
+    // Fire overlap + CLD in parallel; CLD only if beam direction is set.
+    const requests = [
+      fetch(`${API}/field-organ-overlap`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(baseBody),
+      }),
+    ];
+    if (hasCld) {
+      requests.push(
+        fetch(`${API}/field-cld`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...baseBody, beam_direction: [bx, by] }),
+        })
+      );
     }
 
-    const data = await res.json();
-    _showResults(data, lungNames.length > 0, !!heartName);
+    const responses = await Promise.all(requests);
+    for (const r of responses) {
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail ?? `HTTP ${r.status}`);
+      }
+    }
+
+    const [overlapData, cldData] = await Promise.all(responses.map(r => r.json()));
+    _showResults(overlapData, lungNames.length > 0, !!heartName, cldData ?? null);
     _setStatus('Done.', '#81c784');
 
   } catch (err) {
@@ -114,7 +130,7 @@ async function computeStats() {
 
 // ── Display results ───────────────────────────────────────────────────────────
 
-function _showResults(data, showLung, showHeart) {
+function _showResults(data, showLung, showHeart, cldData = null) {
   // Field summary
   document.getElementById('fieldVolume').textContent   = data.field_volume_cc ?? '—';
   document.getElementById('centralSlice').textContent  = data.central_slice_index ?? '—';
@@ -157,6 +173,15 @@ function _showResults(data, showLung, showHeart) {
       percent_in_field > 10 ? '#ef5350' : percent_in_field > 5 ? '#ffb74d' : '#81c784';
   } else {
     heartRow.style.display = 'none';
+  }
+
+  // CLD
+  const cldRow = document.getElementById('cldRow');
+  if (cldData) {
+    document.getElementById('cldValue').textContent = `${cldData.cld_mm} mm`;
+    cldRow.style.display = 'flex';
+  } else {
+    cldRow.style.display = 'none';
   }
 
   document.getElementById('resultsCard').style.display = 'block';

@@ -119,6 +119,24 @@
         </select>
       </div>
     </div>
+    <!-- Beam direction for CLD (optional) -->
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid #333;">
+      <div class="card-title" style="margin-bottom:8px;">Beam Direction (optional — for CLD)</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="font-size:12px;color:#888;">bx</label>
+        <input id="beamBx" type="number" value="1" step="0.1"
+               style="width:70px;background:#2a2a2a;color:#ccc;border:1px solid #444;
+                      border-radius:4px;padding:4px 6px;font-size:12px;" />
+        <label style="font-size:12px;color:#888;">by</label>
+        <input id="beamBy" type="number" value="0" step="0.1"
+               style="width:70px;background:#2a2a2a;color:#ccc;border:1px solid #444;
+                      border-radius:4px;padding:4px 6px;font-size:12px;" />
+        <span style="font-size:11px;color:#555;">
+          Physical mm space: x = col direction, y = row direction
+        </span>
+      </div>
+    </div>
+
     <button id="computeBtn" onclick="computeStats()" disabled>▶ Compute Overlap</button>
     <div id="statusMsg"></div>
   </div>
@@ -155,6 +173,19 @@
         </div>
       </div>
       <div class="metric-pct" id="heartPct" style="color:#ef5350;">—</div>
+    </div>
+
+    <!-- CLD row (shown only when computed) -->
+    <div id="cldRow" class="metric-row" style="display:none;">
+      <div class="metric-icon">📏</div>
+      <div class="metric-body">
+        <div class="metric-name">Central Lung Distance (CLD)</div>
+        <div style="font-size:11px;color:#888;margin-top:3px;">
+          Max projection of lung ∩ field along beam direction · central slice
+        </div>
+      </div>
+      <div class="metric-pct" id="cldValue"
+           style="font-size:18px;color:#ffb74d;white-space:nowrap;">— mm</div>
     </div>
 
     <div class="summary-row">
