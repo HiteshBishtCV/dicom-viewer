@@ -375,6 +375,57 @@ mask = np.frombuffer(raw, dtype=np.uint8).reshape(resp["shape"]).astype(bool)
 - Select file → enter optional ROI name filter → **▶ Generate** — calls `/roi-field-mask` and displays shape, annotated/interpolated slice counts, and total voxel count
 - **⬇ Download .npy** — packages the mask directly in the browser as a valid NumPy 1.0 `.npy` file (no round-trip); uses `DecompressionStream` (Chrome ≥ 80 / Firefox ≥ 113) to inflate zlib in-browser
 
+---
+
+### Field–Organ Overlap Statistics
+
+Computes what fraction of each organ (lung, heart) falls inside the 3-D treatment field.
+
+#### API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/field-organ-stats` | POST | Compute lung/heart overlap with field mask |
+
+**Body:**
+```json
+{
+  "field_mask_b64":  "<base64 zlib uint8>",
+  "lung_mask_b64":   "<base64 zlib uint8>",
+  "heart_mask_b64":  "<base64 zlib uint8>",
+  "shape":           [nz, nr, nc],
+  "spacing":         [dz_mm, dy_mm, dx_mm],
+  "series_uid":      "..."
+}
+```
+`spacing` is optional — omit it and the endpoint reads voxel spacing directly from the uploaded DICOM files. `lung_mask_b64` should be the combined left ∪ right lung mask if both lobes were segmented separately.
+
+**Response:**
+```json
+{
+  "lung":  { "organ_volume_cc": 2400.5, "volume_in_field_cc": 310.2, "percent_in_field": 12.92 },
+  "heart": { "organ_volume_cc":  620.1, "volume_in_field_cc":  48.7, "percent_in_field":  7.85 },
+  "field_volume_cc": 1850.4,
+  "voxel_volume_cc": 0.262144,
+  "spacing_mm": [2.5, 0.977, 0.977]
+}
+```
+
+#### How volumes are computed
+
+`voxel_volume_cc = dz × dy × dx / 1000`  (mm³ → cc)
+
+| Quantity | Formula |
+|----------|---------|
+| `organ_volume_cc` | `count(organ_mask) × voxel_volume_cc` |
+| `volume_in_field_cc` | `count(organ_mask ∩ field_mask) × voxel_volume_cc` |
+| `percent_in_field` | `count(overlap) / count(organ) × 100` |
+
+#### Voxel spacing source
+
+- **Explicit** — pass `"spacing": [dz, dy, dx]`
+- **Auto** — `_read_voxel_spacing()` scans uploaded DICOM headers: `dy`/`dx` from `PixelSpacing`, `dz` from the median gap between consecutive `ImagePositionPatient` z-values (more reliable than `SliceThickness` tag)
+
 ### Auto-Segmentation (Lung + Heart)
 
 CPU-only automatic contouring from CT in the MPR view. No GPU, no model downloads.

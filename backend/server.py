@@ -3410,6 +3410,166 @@ async def roi_field_mask(payload: dict = Body(...)):
     }
 
 
+# ── Field–organ overlap statistics ────────────────────────────────────────────
+
+def _decode_mask_b64(b64: str, shape: list) -> np.ndarray:
+    """
+    Decode a base64(zlib(uint8 C-order)) mask string into a bool ndarray.
+    Raises ValueError on shape mismatch.
+    """
+    raw  = zlib.decompress(base64.b64decode(b64))
+    arr  = np.frombuffer(raw, dtype=np.uint8)
+    expected = int(np.prod(shape))
+    if arr.size != expected:
+        raise ValueError(
+            f"Mask size {arr.size} does not match shape {shape} ({expected} voxels)"
+        )
+    return arr.reshape(shape).astype(bool)
+
+
+def _read_voxel_spacing(series_uid: str = "") -> tuple[float, float, float]:
+    """
+    Read voxel spacing (dz, dy, dx) in mm from the uploaded DICOM files.
+
+    - dy, dx  from PixelSpacing (row spacing, col spacing)
+    - dz      from the median gap between consecutive ImagePositionPatient z-values
+              (more reliable than SliceThickness for multi-frame CT)
+
+    Returns (dz, dy, dx) in mm.  Falls back to (1.0, 1.0, 1.0) if no CT found.
+    """
+    ipps      = []
+    ps_sample = None
+
+    for fname in os.listdir(UPLOAD_DIR):
+        fpath = os.path.join(UPLOAD_DIR, fname)
+        try:
+            ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+            if getattr(ds, "Modality", "") not in ("CT", "MR"):
+                continue
+            if series_uid and str(getattr(ds, "SeriesInstanceUID", "")) != series_uid:
+                continue
+            ipps.append(float(ds.ImagePositionPatient[2]))
+            if ps_sample is None:
+                ps_sample = [float(v) for v in ds.PixelSpacing]
+        except Exception:
+            continue
+
+    dy, dx = (ps_sample[0], ps_sample[1]) if ps_sample else (1.0, 1.0)
+
+    if len(ipps) >= 2:
+        ipps.sort()
+        gaps = [abs(ipps[i + 1] - ipps[i]) for i in range(len(ipps) - 1)]
+        dz   = float(np.median(gaps))
+    else:
+        dz = dy   # square voxel assumption when only one slice present
+
+    return (dz, dy, dx)
+
+
+def _organ_field_stats(
+    organ_mask:    np.ndarray,   # bool (nz, nr, nc)
+    field_mask:    np.ndarray,   # bool (nz, nr, nc)
+    voxel_vol_cc:  float,        # cm³ per voxel
+) -> dict:
+    """
+    Compute volume statistics for one organ against the field mask.
+
+    Returns
+    -------
+    {
+      "organ_volume_cc":        total organ volume in cc,
+      "volume_in_field_cc":     organ ∩ field volume in cc,
+      "percent_in_field":       (organ ∩ field) / organ × 100  (0 if organ empty),
+    }
+    """
+    overlap       = organ_mask & field_mask
+    organ_vox     = int(organ_mask.sum())
+    overlap_vox   = int(overlap.sum())
+
+    organ_vol_cc   = round(organ_vox   * voxel_vol_cc, 2)
+    overlap_vol_cc = round(overlap_vox * voxel_vol_cc, 2)
+    percent        = round(overlap_vox / organ_vox * 100.0, 2) if organ_vox > 0 else 0.0
+
+    return {
+        "organ_volume_cc":   organ_vol_cc,
+        "volume_in_field_cc": overlap_vol_cc,
+        "percent_in_field":   percent,
+    }
+
+
+@app.post("/field-organ-stats")
+async def field_organ_stats(payload: dict = Body(...)):
+    """
+    Compute lung and heart volume overlap with a 3-D treatment field mask.
+
+    All three masks must share the same shape and use the same encoding as
+    the output of POST /roi-field-mask:  base64( zlib( uint8 C-order bytes ) )
+
+    Body:
+      {
+        "field_mask_b64":  "...",          // treatment-field binary mask
+        "lung_mask_b64":   "...",          // combined (left ∪ right) lung mask
+        "heart_mask_b64":  "...",          // heart mask
+        "shape":           [nz, nr, nc],   // shared volume shape
+        "spacing":         [dz, dy, dx],   // mm per voxel (optional — read from CT if absent)
+        "series_uid":      "..."           // used only when spacing is absent
+      }
+
+    Returns:
+      {
+        "lung": {
+          "organ_volume_cc":    <total lung volume in cc>,
+          "volume_in_field_cc": <lung volume inside field in cc>,
+          "percent_in_field":   <percentage of lung inside field>
+        },
+        "heart": { ... same fields ... },
+        "field_volume_cc":  <total field volume in cc>,
+        "voxel_volume_cc":  <mm³ → cc conversion factor used>
+      }
+    """
+    # ── Decode masks ──────────────────────────────────────────────────────────
+    shape = payload.get("shape")
+    if not shape or len(shape) != 3:
+        raise HTTPException(422, "'shape' must be [nz, nr, nc]")
+
+    required = ("field_mask_b64", "lung_mask_b64", "heart_mask_b64")
+    for key in required:
+        if key not in payload:
+            raise HTTPException(422, f"Missing required field '{key}'")
+
+    try:
+        field_mask = _decode_mask_b64(payload["field_mask_b64"], shape)
+        lung_mask  = _decode_mask_b64(payload["lung_mask_b64"],  shape)
+        heart_mask = _decode_mask_b64(payload["heart_mask_b64"], shape)
+    except (ValueError, Exception) as exc:
+        raise HTTPException(422, f"Mask decode error: {exc}")
+
+    # ── Voxel spacing → volume per voxel ─────────────────────────────────────
+    spacing = payload.get("spacing")
+    if spacing and len(spacing) == 3:
+        dz, dy, dx = float(spacing[0]), float(spacing[1]), float(spacing[2])
+    else:
+        series_uid  = payload.get("series_uid", "")
+        dz, dy, dx  = await asyncio.to_thread(_read_voxel_spacing, series_uid)
+
+    voxel_vol_mm3 = dz * dy * dx          # mm³
+    voxel_vol_cc  = voxel_vol_mm3 / 1000  # 1 cc = 1000 mm³
+
+    # ── Per-organ stats ───────────────────────────────────────────────────────
+    lung_stats  = _organ_field_stats(lung_mask,  field_mask, voxel_vol_cc)
+    heart_stats = _organ_field_stats(heart_mask, field_mask, voxel_vol_cc)
+
+    field_vol_cc = round(int(field_mask.sum()) * voxel_vol_cc, 2)
+
+    return {
+        "lung":            lung_stats,
+        "heart":           heart_stats,
+        "field_volume_cc": field_vol_cc,
+        "voxel_volume_cc": round(voxel_vol_cc, 6),
+        "spacing_mm":      [round(dz, 4), round(dy, 4), round(dx, 4)],
+    }
+
+
 @app.get("/")
 def root():
     return {"message": "Server is running"}
