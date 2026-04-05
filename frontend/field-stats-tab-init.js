@@ -85,40 +85,27 @@ async function computeStats() {
   document.getElementById('resultsCard').style.display = 'none';
 
   try {
-    const baseBody = {
+    const body = {
       series_uid:     _seriesUid,
       rois:           _allRois,
       field_roi_name: fieldName,
       lung_roi_names: lungNames,
       heart_roi_name: heartName,
     };
+    if (hasCld) body.beam_direction = [bx, by];
 
-    // Fire overlap + CLD in parallel; CLD only if beam direction is set.
-    const requests = [
-      fetch(`${API}/field-organ-overlap`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(baseBody),
-      }),
-    ];
-    if (hasCld) {
-      requests.push(
-        fetch(`${API}/field-cld`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...baseBody, beam_direction: [bx, by] }),
-        })
-      );
+    const res = await fetch(`${API}/rt-features`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail ?? `HTTP ${res.status}`);
     }
 
-    const responses = await Promise.all(requests);
-    for (const r of responses) {
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.detail ?? `HTTP ${r.status}`);
-      }
-    }
-
-    const [overlapData, cldData] = await Promise.all(responses.map(r => r.json()));
-    _showResults(overlapData, lungNames.length > 0, !!heartName, cldData ?? null);
+    const data = await res.json();
+    _showResults(data, lungNames.length > 0, !!heartName);
     _setStatus('Done.', '#81c784');
 
   } catch (err) {
@@ -130,55 +117,51 @@ async function computeStats() {
 
 // ── Display results ───────────────────────────────────────────────────────────
 
-function _showResults(data, showLung, showHeart, cldData = null) {
-  // Field summary
-  document.getElementById('fieldVolume').textContent   = data.field_volume_cc ?? '—';
-  document.getElementById('centralSlice').textContent  = data.central_slice_index ?? '—';
-  document.getElementById('voxelVol').textContent      = data.voxel_volume_cc ?? '—';
+function _showResults(data, showLung, showHeart) {
+  // ── Summary ───────────────────────────────────────────────────────────────
+  document.getElementById('fieldVolume').textContent  = data.field_volume_cc  ?? '—';
+  document.getElementById('centralSlice').textContent = data.central_slice_index ?? '—';
+  document.getElementById('voxelVol').textContent     = '—';   // not in flat dict
   const sp = data.spacing_mm ?? [];
-  document.getElementById('spacingTxt').textContent  =
+  document.getElementById('spacingTxt').textContent   =
     sp.length === 3 ? `${sp[0]} × ${sp[1]} × ${sp[2]} mm` : '—';
 
-  // Lung
+  // ── Lung ──────────────────────────────────────────────────────────────────
   const lungRow = document.getElementById('lungRow');
-  if (showLung && data.lung) {
-    const { organ_volume_cc, volume_in_field_cc, percent_in_field } = data.lung;
+  if (showLung && data.lung_volume_cc != null) {
+    const pct = data.lung_percent_in_field ?? 0;
     lungRow.style.display = 'flex';
-
-    document.getElementById('lungTotal').textContent   = organ_volume_cc;
-    document.getElementById('lungInField').textContent = volume_in_field_cc;
-    document.getElementById('lungPct').textContent     = percent_in_field + '%';
-    document.getElementById('lungBar').style.width     = Math.min(percent_in_field, 100) + '%';
-    document.getElementById('lungBar').style.background =
-      percent_in_field > 35 ? '#ef5350' : percent_in_field > 20 ? '#ffb74d' : '#4fc3f7';
-    document.getElementById('lungPct').style.color =
-      percent_in_field > 35 ? '#ef5350' : percent_in_field > 20 ? '#ffb74d' : '#4fc3f7';
+    document.getElementById('lungTotal').textContent   = data.lung_volume_cc;
+    document.getElementById('lungInField').textContent = data.lung_volume_in_field_cc;
+    document.getElementById('lungPct').textContent     = pct + '%';
+    document.getElementById('lungBar').style.width     = Math.min(pct, 100) + '%';
+    const lungColour = pct > 35 ? '#ef5350' : pct > 20 ? '#ffb74d' : '#4fc3f7';
+    document.getElementById('lungBar').style.background = lungColour;
+    document.getElementById('lungPct').style.color      = lungColour;
   } else {
     lungRow.style.display = 'none';
   }
 
-  // Heart
+  // ── Heart ─────────────────────────────────────────────────────────────────
   const heartRow = document.getElementById('heartRow');
-  if (showHeart && data.heart) {
-    const { organ_volume_cc, volume_in_field_cc, percent_in_field } = data.heart;
+  if (showHeart && data.heart_volume_cc != null) {
+    const pct = data.heart_percent_in_field ?? 0;
     heartRow.style.display = 'flex';
-
-    document.getElementById('heartTotal').textContent   = organ_volume_cc;
-    document.getElementById('heartInField').textContent = volume_in_field_cc;
-    document.getElementById('heartPct').textContent     = percent_in_field + '%';
-    document.getElementById('heartBar').style.width     = Math.min(percent_in_field, 100) + '%';
-    document.getElementById('heartBar').style.background =
-      percent_in_field > 10 ? '#ef5350' : percent_in_field > 5 ? '#ffb74d' : '#81c784';
-    document.getElementById('heartPct').style.color =
-      percent_in_field > 10 ? '#ef5350' : percent_in_field > 5 ? '#ffb74d' : '#81c784';
+    document.getElementById('heartTotal').textContent   = data.heart_volume_cc;
+    document.getElementById('heartInField').textContent = data.heart_volume_in_field_cc;
+    document.getElementById('heartPct').textContent     = pct + '%';
+    document.getElementById('heartBar').style.width     = Math.min(pct, 100) + '%';
+    const heartColour = pct > 10 ? '#ef5350' : pct > 5 ? '#ffb74d' : '#81c784';
+    document.getElementById('heartBar').style.background = heartColour;
+    document.getElementById('heartPct').style.color      = heartColour;
   } else {
     heartRow.style.display = 'none';
   }
 
-  // CLD
+  // ── CLD ───────────────────────────────────────────────────────────────────
   const cldRow = document.getElementById('cldRow');
-  if (cldData) {
-    document.getElementById('cldValue').textContent = `${cldData.cld_mm} mm`;
+  if (data.cld_mm != null) {
+    document.getElementById('cldValue').textContent = `${data.cld_mm} mm`;
     cldRow.style.display = 'flex';
   } else {
     cldRow.style.display = 'none';

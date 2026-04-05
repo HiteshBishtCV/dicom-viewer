@@ -3896,6 +3896,160 @@ async def field_cld(payload: dict = Body(...)):
     }
 
 
+# ── Radiotherapy feature extractor ────────────────────────────────────────────
+
+def extract_rt_features(
+    lung_mask:   np.ndarray,        # bool (nz, nrows, ncols)
+    heart_mask:  np.ndarray,        # bool (nz, nrows, ncols)
+    field_mask:  np.ndarray,        # bool (nz, nrows, ncols)
+    dz:          float,             # mm per voxel in z  (slice direction)
+    dy:          float,             # mm per voxel in y  (row direction)
+    dx:          float,             # mm per voxel in x  (column direction)
+    beam_dir:    list | None = None,  # [bx, by] in physical mm space; None → skip CLD
+) -> dict:
+    """
+    Extract a flat radiotherapy feature dictionary from pre-computed 3-D masks.
+
+    This function is intentionally pure and reusable:
+      - No I/O, no HTTP, no global state.
+      - All inputs are numpy arrays + scalars.
+      - Safe to call from tests, notebooks, or batch pipelines.
+
+    Parameters
+    ----------
+    lung_mask   : combined left+right lung binary volume (True = lung voxel)
+    heart_mask  : heart binary volume
+    field_mask  : treatment-field binary volume (e.g. tangential field ROI)
+    dz, dy, dx  : voxel spacing in mm (z=slice, y=row, x=col)
+    beam_dir    : optional 2-D beam direction [bx, by] in physical mm space
+                  for CLD calculation.  Need not be pre-normalised.
+                  Pass None to omit CLD (feature will be None in output).
+
+    Returns
+    -------
+    Flat dict with keys:
+
+      lung_volume_cc          – total lung volume in cc
+      heart_volume_cc         – total heart volume in cc
+      field_volume_cc         – total field volume in cc
+      lung_volume_in_field_cc – lung ∩ field volume in cc
+      heart_volume_in_field_cc– heart ∩ field volume in cc
+      lung_percent_in_field   – (lung ∩ field) / lung  × 100  [%]
+      heart_percent_in_field  – (heart ∩ field) / heart × 100 [%]
+      central_slice_index     – z-index of the mid-field slice
+      cld_mm                  – Central Lung Distance in mm  (None if no beam_dir)
+      lung_in_field_pixels    – pixel count used for CLD     (None if no beam_dir)
+    """
+    voxel_vol_cc = dz * dy * dx / 1000.0   # mm³ → cc  (1 cc = 1000 mm³)
+
+    # ── Per-organ statistics ──────────────────────────────────────────────────
+    lung_stats  = _organ_field_stats(lung_mask,  field_mask, voxel_vol_cc)
+    heart_stats = _organ_field_stats(heart_mask, field_mask, voxel_vol_cc)
+
+    field_vox    = int(field_mask.sum())
+    field_vol_cc = round(field_vox * voxel_vol_cc, 2)
+
+    # ── Central slice ─────────────────────────────────────────────────────────
+    central_z = _field_central_slice(field_mask)
+
+    # ── CLD (requires beam direction) ─────────────────────────────────────────
+    cld_mm           = None
+    lung_in_field_px = None
+    if beam_dir is not None:
+        cld_result       = _compute_cld(lung_mask, field_mask, central_z, dx, dy, beam_dir)
+        cld_mm           = cld_result["cld_mm"]
+        lung_in_field_px = cld_result["lung_in_field_pixels"]
+
+    return {
+        # Volumes
+        "lung_volume_cc":           lung_stats["organ_volume_cc"],
+        "heart_volume_cc":          heart_stats["organ_volume_cc"],
+        "field_volume_cc":          field_vol_cc,
+        "lung_volume_in_field_cc":  lung_stats["volume_in_field_cc"],
+        "heart_volume_in_field_cc": heart_stats["volume_in_field_cc"],
+        # Percentages
+        "lung_percent_in_field":    lung_stats["percent_in_field"],
+        "heart_percent_in_field":   heart_stats["percent_in_field"],
+        # Geometry
+        "central_slice_index":      central_z,
+        "cld_mm":                   cld_mm,
+        "lung_in_field_pixels":     lung_in_field_px,
+    }
+
+
+@app.post("/rt-features")
+async def rt_features(payload: dict = Body(...)):
+    """
+    Extract all radiotherapy features for a tangential field in one call.
+
+    Builds lung, heart, and field masks from ROIs, then calls
+    extract_rt_features() to compute all metrics.
+
+    Body:
+      {
+        "series_uid":     "...",
+        "rois":           [ {name, slice, points, ...} ],
+        "field_roi_name": "ROI_1",
+        "lung_roi_names": ["Left Lung", "Right Lung"],
+        "heart_roi_name": "Heart",
+        "beam_direction": [bx, by],      // optional — omit to skip CLD
+        "spacing":        [dz, dy, dx]   // optional — auto-read from CT
+      }
+
+    Returns: the flat feature dict from extract_rt_features(), plus
+      "spacing_mm": [dz, dy, dx]
+    """
+    series_uid  = payload.get("series_uid",     "")
+    rois        = payload.get("rois",            [])
+    field_name  = payload.get("field_roi_name",  "")
+    lung_names  = payload.get("lung_roi_names",  [])
+    heart_name  = payload.get("heart_roi_name",  "")
+    beam_dir    = payload.get("beam_direction",  None)
+
+    if not rois:
+        raise HTTPException(422, "'rois' is required")
+    if not field_name:
+        raise HTTPException(422, "'field_roi_name' is required")
+    if not lung_names:
+        raise HTTPException(422, "'lung_roi_names' is required")
+    if not heart_name:
+        raise HTTPException(422, "'heart_roi_name' is required")
+
+    # ── CT dimensions + spacing ───────────────────────────────────────────────
+    vol, _ = await asyncio.to_thread(_load_ct_volume, series_uid)
+    if vol is None:
+        raise HTTPException(422, "No CT volume found — upload DICOM first")
+    nz, nrows, ncols = vol.shape
+    del vol
+
+    spacing = payload.get("spacing")
+    if spacing and len(spacing) == 3:
+        dz, dy, dx = float(spacing[0]), float(spacing[1]), float(spacing[2])
+    else:
+        dz, dy, dx = await asyncio.to_thread(_read_voxel_spacing, series_uid)
+
+    # ── Rasterise all three masks in parallel ─────────────────────────────────
+    field_mask, lung_mask, heart_mask = await asyncio.gather(
+        asyncio.to_thread(_rois_to_mask, rois, [field_name], nz, nrows, ncols),
+        asyncio.to_thread(_rois_to_mask, rois, lung_names,   nz, nrows, ncols),
+        asyncio.to_thread(_rois_to_mask, rois, [heart_name], nz, nrows, ncols),
+    )
+
+    if not field_mask.any():
+        raise HTTPException(422, f"Field ROI '{field_name}' produced an empty mask")
+
+    # ── Feature extraction (pure, CPU-bound → offload) ────────────────────────
+    features = await asyncio.to_thread(
+        extract_rt_features,
+        lung_mask, heart_mask, field_mask,
+        dz, dy, dx,
+        beam_dir,
+    )
+
+    features["spacing_mm"] = [round(dz, 4), round(dy, 4), round(dx, 4)]
+    return features
+
+
 @app.get("/")
 def root():
     return {"message": "Server is running"}
