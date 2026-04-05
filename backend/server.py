@@ -60,9 +60,8 @@ def fix_dicom_header(path):
     meta.TransferSyntaxUID = ExplicitVRLittleEndian
 
     ds.file_meta = meta
-    ds.is_implicit_VR = False
-    ds.is_little_endian = True
-
+    # is_implicit_VR / is_little_endian removed in pydicom 3.x;
+    # the transfer syntax in file_meta controls encoding.
     ds.save_as(path, write_like_original=False)
 
 
@@ -842,8 +841,6 @@ def _build_rtstruct(rois: list[dict], ct_slices: list[dict]) -> FileDataset:
     file_meta.TransferSyntaxUID          = ExplicitVRLittleEndian
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
-    ds.is_implicit_VR   = False
-    ds.is_little_endian = True
 
     # ── Shared CT metadata — RTSTRUCT lives in the same study as the CT ────────
     ref = ct_slices[0]
