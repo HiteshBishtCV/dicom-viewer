@@ -2111,36 +2111,47 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
                     run_cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
+                    stdin=subprocess.DEVNULL,   # prevent blocking on terminal input
+                    text=False,                 # bytes mode — handles \r from tqdm
+                    bufsize=0,                  # unbuffered: every byte arrives immediately
                 )
-                tail = []
+                tail   = []
+                buf    = b""
 
-                for raw in p.stdout:
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    print(f"[TS] {line}", flush=True)
-                    tail.append(line)
-                    if len(tail) > 30:
-                        tail.pop(0)
+                # Read byte-by-byte so both \n and \r (tqdm) flush correctly.
+                # Accumulate into buf; emit a "line" on every \n or \r.
+                while True:
+                    ch = p.stdout.read(1)
+                    if not ch:
+                        break
+                    if ch in (b"\n", b"\r"):
+                        line = buf.decode("utf-8", errors="replace").strip()
+                        buf  = b""
+                        if not line:
+                            continue
+                        print(f"[TS] {line}", flush=True)
+                        tail.append(line)
+                        if len(tail) > 30:
+                            tail.pop(0)
 
-                    m = re.search(r'Downloading[^:]*:\s*(\d+)%', line)
-                    if m:
-                        dl  = int(m.group(1))
-                        pct = 22 + int(dl * 0.50)
-                        sm  = re.search(r'([\d.]+[MG])\s*/\s*([\d.]+[MG])', line)
-                        ss  = f" ({sm.group(1)}/{sm.group(2)})" if sm else ""
-                        _upd(pct, f"Downloading weights: {dl}%{ss} (cached after this)…")
-                        continue
+                        m = re.search(r'Downloading[^:]*:\s*(\d+)%', line)
+                        if m:
+                            dl  = int(m.group(1))
+                            pct = 22 + int(dl * 0.50)
+                            sm  = re.search(r'([\d.]+[MG])\s*/\s*([\d.]+[MG])', line)
+                            ss  = f" ({sm.group(1)}/{sm.group(2)})" if sm else ""
+                            _upd(pct, f"Downloading weights: {dl}%{ss} (cached after this)…")
+                            continue
 
-                    low = line.lower()
-                    if "resamp" in low:
-                        _upd(73, f"Resampling CT [{try_device.upper()}]…")
-                    elif "predict" in low or "infer" in low:
-                        _upd(76, f"Neural network inference [{try_device.upper()}]…")
-                    elif "saving" in low or "writing" in low:
-                        _upd(80, "Saving segmentation…")
+                        low = line.lower()
+                        if "resamp" in low:
+                            _upd(73, f"Resampling CT [{try_device.upper()}]…")
+                        elif "predict" in low or "infer" in low:
+                            _upd(76, f"Neural network inference [{try_device.upper()}]…")
+                        elif "saving" in low or "writing" in low:
+                            _upd(80, "Saving segmentation…")
+                    else:
+                        buf += ch
 
                 rc = p.wait()
                 return rc, tail
