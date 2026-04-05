@@ -3410,6 +3410,124 @@ async def roi_field_mask(payload: dict = Body(...)):
     }
 
 
+# ── Field–organ overlap (single-call, no pre-computed masks) ──────────────────
+
+def _rois_to_mask(
+    rois: list,
+    roi_names: list[str],
+    nz: int,
+    nrows: int,
+    ncols: int,
+) -> np.ndarray:
+    """
+    Rasterise all ROIs whose name is in roi_names into one combined bool mask.
+    Polygons on the same slice are unioned; slices between annotated ones are
+    filled via SDT interpolation.  Returns a (nz, nrows, ncols) bool array.
+    """
+    per_slice: dict[int, np.ndarray] = {}
+    name_set = set(roi_names)
+    for roi in rois:
+        if roi.get("name") not in name_set:
+            continue
+        z      = int(roi.get("slice", roi.get("planeIndex", 0)))
+        points = roi.get("points", [])
+        if z < 0 or z >= nz or len(points) < 3:
+            continue
+        m = _polygon_to_mask(points, nrows, ncols)
+        if z in per_slice:
+            per_slice[z] |= m
+        else:
+            per_slice[z] = m
+
+    if not per_slice:
+        return np.zeros((nz, nrows, ncols), dtype=bool)
+    return _interpolate_masks_sdt(per_slice, nz, nrows, ncols)
+
+
+@app.post("/field-organ-overlap")
+async def field_organ_overlap(payload: dict = Body(...)):
+    """
+    Compute lung and heart volume overlap with a treatment-field ROI in a
+    single round-trip.  All rasterisation and interpolation happen server-side;
+    the caller only needs to forward the ROI list from the MPR view.
+
+    Body:
+      {
+        "series_uid":      "...",              // used to match CT volume
+        "rois":            [ {name, slice, points, ...}, ... ],  // all drawn ROIs
+        "field_roi_name":  "ROI_1",            // name of the field/treatment ROI
+        "lung_roi_names":  ["Left Lung", "Right Lung"],  // one or both lung ROIs
+        "heart_roi_name":  "Heart"             // heart ROI name (or "" to skip)
+      }
+
+    Returns:
+      {
+        "lung":  { "organ_volume_cc", "volume_in_field_cc", "percent_in_field" } | null,
+        "heart": { ... } | null,
+        "field_volume_cc": ...,
+        "voxel_volume_cc": ...,
+        "spacing_mm":      [dz, dy, dx]
+      }
+    """
+    series_uid     = payload.get("series_uid",     "")
+    rois           = payload.get("rois",            [])
+    field_name     = payload.get("field_roi_name",  "")
+    lung_names     = payload.get("lung_roi_names",  [])
+    heart_name     = payload.get("heart_roi_name",  "")
+
+    if not rois:
+        raise HTTPException(422, "'rois' list is required")
+    if not field_name:
+        raise HTTPException(422, "'field_roi_name' is required")
+
+    # ── CT volume dimensions + spacing ───────────────────────────────────────
+    vol, _slices = await asyncio.to_thread(_load_ct_volume, series_uid)
+    if vol is None:
+        raise HTTPException(422, "No CT volume found — upload DICOM first")
+    nz, nrows, ncols = vol.shape
+    del vol   # free memory — we only needed the shape
+
+    dz, dy, dx    = await asyncio.to_thread(_read_voxel_spacing, series_uid)
+    voxel_vol_cc  = dz * dy * dx / 1000.0
+
+    # ── Rasterise masks in parallel threads ──────────────────────────────────
+    def _build_field():
+        return _rois_to_mask(rois, [field_name], nz, nrows, ncols)
+
+    def _build_lung():
+        if not lung_names:
+            return None
+        return _rois_to_mask(rois, lung_names, nz, nrows, ncols)
+
+    def _build_heart():
+        if not heart_name:
+            return None
+        return _rois_to_mask(rois, [heart_name], nz, nrows, ncols)
+
+    field_mask, lung_mask, heart_mask = await asyncio.gather(
+        asyncio.to_thread(_build_field),
+        asyncio.to_thread(_build_lung),
+        asyncio.to_thread(_build_heart),
+    )
+
+    if not field_mask.any():
+        raise HTTPException(422, f"Field ROI '{field_name}' produced an empty mask — "
+                                  "check that ROIs with this name exist and are on axial slices")
+
+    # ── Compute stats ─────────────────────────────────────────────────────────
+    field_vol_cc = round(int(field_mask.sum()) * voxel_vol_cc, 2)
+    lung_stats   = _organ_field_stats(lung_mask,  field_mask, voxel_vol_cc) if lung_mask  is not None else None
+    heart_stats  = _organ_field_stats(heart_mask, field_mask, voxel_vol_cc) if heart_mask is not None else None
+
+    return {
+        "lung":            lung_stats,
+        "heart":           heart_stats,
+        "field_volume_cc": field_vol_cc,
+        "voxel_volume_cc": round(voxel_vol_cc, 6),
+        "spacing_mm":      [round(dz, 4), round(dy, 4), round(dx, 4)],
+    }
+
+
 # ── Field–organ overlap statistics ────────────────────────────────────────────
 
 def _decode_mask_b64(b64: str, shape: list) -> np.ndarray:

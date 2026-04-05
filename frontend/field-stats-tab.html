@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Field–Organ Stats — DICOM</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: sans-serif; background: #1a1a1a; color: #e0e0e0;
+      padding: 24px; min-height: 100vh;
+    }
+
+    h2 { font-size: 18px; font-weight: 700; color: #4fc3f7; margin-bottom: 4px; }
+    .subtitle { font-size: 12px; color: #555; margin-bottom: 20px; }
+
+    .card {
+      background: #222; border: 1px solid #333; border-radius: 8px;
+      padding: 16px; margin-bottom: 16px;
+    }
+    .card-title {
+      font-size: 10px; font-weight: 700; color: #555; letter-spacing: 1px;
+      text-transform: uppercase; margin-bottom: 12px;
+    }
+
+    /* Structure assignment row */
+    .assign-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .assign-col label {
+      display: block; font-size: 11px; color: #888;
+      margin-bottom: 5px; font-weight: 600;
+    }
+    .assign-col select {
+      width: 100%; background: #2a2a2a; color: #ccc;
+      border: 1px solid #444; border-radius: 4px;
+      padding: 6px 8px; font-size: 12px;
+    }
+    .assign-col select[multiple] { height: 80px; }
+
+    /* Compute button */
+    #computeBtn {
+      width: 100%; padding: 11px; border-radius: 6px; border: none; cursor: pointer;
+      font-size: 14px; font-weight: 700;
+      background: linear-gradient(135deg, #0a4a7a, #0078d4);
+      color: #fff; transition: opacity .15s; margin-top: 4px;
+    }
+    #computeBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+    #computeBtn:not(:disabled):hover { opacity: 0.85; }
+
+    /* Status */
+    #statusMsg {
+      display: none; font-size: 12px; color: #aaa; margin-top: 10px;
+      padding: 6px 10px; background: #1a1a1a; border-radius: 4px;
+      border-left: 3px solid #444; font-family: monospace;
+    }
+
+    /* Results */
+    #resultsCard { display: none; }
+
+    .metric-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 0; border-bottom: 1px solid #2a2a2a;
+    }
+    .metric-row:last-child { border-bottom: none; }
+
+    .metric-icon { font-size: 22px; flex-shrink: 0; width: 30px; text-align: center; }
+
+    .metric-body { flex: 1; min-width: 0; }
+    .metric-name { font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+    .metric-bar-wrap {
+      background: #2a2a2a; border-radius: 3px; height: 6px; width: 100%; overflow: hidden;
+    }
+    .metric-bar { height: 100%; border-radius: 3px; transition: width .6s ease; }
+
+    .metric-nums { display: flex; gap: 16px; margin-top: 5px; }
+    .metric-nums span { font-size: 11px; color: #888; }
+    .metric-nums strong { color: #e0e0e0; }
+
+    .metric-pct {
+      font-size: 22px; font-weight: 700; min-width: 64px;
+      text-align: right; flex-shrink: 0;
+    }
+
+    /* Summary footer */
+    .summary-row {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-top: 12px; padding-top: 10px; border-top: 1px solid #333;
+      font-size: 12px; color: #666;
+    }
+    .summary-row strong { color: #ccc; }
+  </style>
+</head>
+<body>
+
+  <h2>📊 Field–Organ Overlap</h2>
+  <div class="subtitle" id="seriesInfo">Waiting for data from MPR view…</div>
+
+  <!-- Structure assignment -->
+  <div class="card">
+    <div class="card-title">Structure Assignment</div>
+    <div class="assign-row">
+      <div class="assign-col">
+        <label>Treatment Field ROI</label>
+        <select id="fieldSelect">
+          <option value="">— select —</option>
+        </select>
+      </div>
+      <div class="assign-col">
+        <label>Lung(s)  <span style="color:#555;font-weight:400;">(hold Ctrl for multi)</span></label>
+        <select id="lungSelect" multiple>
+        </select>
+      </div>
+      <div class="assign-col">
+        <label>Heart</label>
+        <select id="heartSelect">
+          <option value="">— none / skip —</option>
+        </select>
+      </div>
+    </div>
+    <button id="computeBtn" onclick="computeStats()" disabled>▶ Compute Overlap</button>
+    <div id="statusMsg"></div>
+  </div>
+
+  <!-- Results -->
+  <div class="card" id="resultsCard">
+    <div class="card-title">Overlap Results</div>
+
+    <div id="lungRow" class="metric-row" style="display:none;">
+      <div class="metric-icon">🫁</div>
+      <div class="metric-body">
+        <div class="metric-name">Lung</div>
+        <div class="metric-bar-wrap">
+          <div class="metric-bar" id="lungBar" style="width:0%;background:#4fc3f7;"></div>
+        </div>
+        <div class="metric-nums">
+          <span>In field: <strong id="lungInField">—</strong> cc</span>
+          <span>Total lung: <strong id="lungTotal">—</strong> cc</span>
+        </div>
+      </div>
+      <div class="metric-pct" id="lungPct" style="color:#4fc3f7;">—</div>
+    </div>
+
+    <div id="heartRow" class="metric-row" style="display:none;">
+      <div class="metric-icon">❤️</div>
+      <div class="metric-body">
+        <div class="metric-name">Heart</div>
+        <div class="metric-bar-wrap">
+          <div class="metric-bar" id="heartBar" style="width:0%;background:#ef5350;"></div>
+        </div>
+        <div class="metric-nums">
+          <span>In field: <strong id="heartInField">—</strong> cc</span>
+          <span>Total heart: <strong id="heartTotal">—</strong> cc</span>
+        </div>
+      </div>
+      <div class="metric-pct" id="heartPct" style="color:#ef5350;">—</div>
+    </div>
+
+    <div class="summary-row">
+      <span>Field volume: <strong id="fieldVolume">—</strong> cc</span>
+      <span>Voxel: <strong id="voxelVol">—</strong> cc &nbsp;|&nbsp; Spacing: <strong id="spacingTxt">—</strong></span>
+    </div>
+  </div>
+
+  <script src="field-stats-tab-init.js"></script>
+</body>
+</html>

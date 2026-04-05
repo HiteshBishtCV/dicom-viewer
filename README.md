@@ -377,7 +377,47 @@ mask = np.frombuffer(raw, dtype=np.uint8).reshape(resp["shape"]).astype(bool)
 
 ---
 
-### Field–Organ Overlap Statistics
+### Field–Organ Overlap — Live Stats Tab
+
+A dedicated **📊 Field Stats** tab shows how much lung and heart volume falls inside the drawn treatment field.
+
+#### Workflow
+
+1. In the MPR view, draw the treatment field ROI (e.g. `ROI_1`) and run organ segmentation (lung + heart)
+2. Click **📊 Field Stats** in the MPR toolbar
+3. The tab opens and receives all current ROIs automatically
+4. Assign structures: pick the field ROI, select lung(s), select heart
+5. Click **▶ Compute Overlap**
+6. Results appear with metric bars and volume numbers
+
+#### Display
+
+| Element | Meaning |
+|---------|---------|
+| Bar + % | Fraction of the organ that lies inside the field |
+| "In field" | Volume (cc) of organ ∩ field |
+| "Total" | Total organ volume (cc) |
+| Bar colour | Blue → normal · Amber → elevated · Red → high (lung >35 %, heart >10 %) |
+
+#### API
+
+`POST /field-organ-overlap` — single round-trip, no pre-computed masks needed:
+
+```json
+{
+  "series_uid":     "...",
+  "rois":           [ {name, slice, points, ...} ],
+  "field_roi_name": "ROI_1",
+  "lung_roi_names": ["Left Lung", "Right Lung"],
+  "heart_roi_name": "Heart"
+}
+```
+
+The backend rasterises and SDT-interpolates each structure mask in parallel threads, then calls `_organ_field_stats` for each organ. Voxel spacing is read automatically from the uploaded DICOM headers.
+
+---
+
+### Field–Organ Overlap Statistics (low-level, pre-computed masks)
 
 Computes what fraction of each organ (lung, heart) falls inside the 3-D treatment field.
 

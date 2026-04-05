@@ -443,6 +443,42 @@ function _importSegResults(structureMap) {
   return rois.length;
 }
 
+// ── Field Stats tab ───────────────────────────────────────────────────────────
+
+let _fieldStatsWindow = null;
+
+/**
+ * Open the Field–Organ Overlap tab and forward all current ROIs + series UID.
+ * If the window is already open, focus it and resend the payload.
+ */
+function openFieldStatsTab() {
+  const rois = (typeof mprRoi !== 'undefined') ? mprRoi.getRois() : [];
+  if (!rois.length) {
+    alert('No ROIs drawn yet.\nDraw a field ROI and segment the organs first, then open Field Stats.');
+    return;
+  }
+
+  const uid     = window._mprSeriesUid ?? '';
+  const payload = { type: 'field-stats-data', series_uid: uid, rois };
+
+  if (_fieldStatsWindow && !_fieldStatsWindow.closed) {
+    _fieldStatsWindow.focus();
+    _fieldStatsWindow.postMessage(payload, '*');
+    return;
+  }
+
+  _fieldStatsWindow = window.open('field-stats-tab.html', 'field-stats');
+
+  // Wait for the tab to signal readiness before sending data.
+  const handler = e => {
+    if (e.data?.type === 'field-stats-ready' && e.source === _fieldStatsWindow) {
+      window.removeEventListener('message', handler);
+      _fieldStatsWindow.postMessage(payload, '*');
+    }
+  };
+  window.addEventListener('message', handler);
+}
+
 // ── AI segmentation tab ───────────────────────────────────────────────────────
 
 let _mlSegWindow = null;
