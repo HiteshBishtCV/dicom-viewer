@@ -31,10 +31,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR   = "uploaded_dicoms"
-ROI_SAVE_DIR = "saved_rois"
-os.makedirs(UPLOAD_DIR,   exist_ok=True)
-os.makedirs(ROI_SAVE_DIR, exist_ok=True)
+UPLOAD_DIR    = "uploaded_dicoms"
+ROI_SAVE_DIR  = "saved_rois"
+MASK_SAVE_DIR = "saved_masks"
+os.makedirs(UPLOAD_DIR,    exist_ok=True)
+os.makedirs(ROI_SAVE_DIR,  exist_ok=True)
+os.makedirs(MASK_SAVE_DIR, exist_ok=True)
 
 app.mount("/files", StaticFiles(directory="."), name="files")
 
@@ -3396,18 +3398,40 @@ async def roi_field_mask(payload: dict = Body(...)):
     interpolated_count  = int(field_mask.any(axis=(1, 2)).sum()) - annotated_count
     voxel_count         = int(field_mask.sum())
 
-    # ── Serialise: zlib-compress uint8 bytes, base64-encode ──────────────────
-    raw        = field_mask.astype(np.uint8).tobytes()   # C-order (z,row,col)
-    compressed = zlib.compress(raw, level=6)
-    b64        = base64.b64encode(compressed).decode()
+    # ── Save to disk as .npy ─────────────────────────────────────────────────
+    timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    safe_name = roi_name.replace(" ", "_").replace("/", "-")[:40]
+    filename  = f"mask_{safe_name}_{timestamp}.npy"
+    filepath  = os.path.join(MASK_SAVE_DIR, filename)
+    np.save(filepath, field_mask.astype(np.uint8))
 
     return {
         "shape":               list(field_mask.shape),
         "annotated_slices":    annotated_count,
         "interpolated_slices": max(0, interpolated_count),
         "voxel_count":         voxel_count,
-        "field_mask_b64":      b64,
+        "saved_file":          filename,
     }
+
+
+@app.get("/saved-masks/")
+def list_saved_masks():
+    """Return saved field-mask filenames, newest first."""
+    files = sorted(
+        (f for f in os.listdir(MASK_SAVE_DIR) if f.endswith(".npy")),
+        reverse=True,
+    )
+    return {"files": files}
+
+
+@app.get("/saved-masks/{filename}")
+def download_saved_mask(filename: str):
+    """Download a saved field-mask .npy file."""
+    safe = os.path.basename(filename)
+    path = os.path.join(MASK_SAVE_DIR, safe)
+    if not os.path.exists(path):
+        raise HTTPException(404, f"Not found: {safe}")
+    return FileResponse(path, media_type="application/octet-stream", filename=safe)
 
 
 # ── Field–organ overlap (single-call, no pre-computed masks) ──────────────────

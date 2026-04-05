@@ -373,7 +373,7 @@ mask = np.frombuffer(raw, dtype=np.uint8).reshape(resp["shape"]).astype(bool)
 
 - **↻ Refresh** — loads saved ROI file list from `/load-roi/`
 - Select file → enter optional ROI name filter → **▶ Generate** — calls `/roi-field-mask` and displays shape, annotated/interpolated slice counts, and total voxel count
-- **⬇ Download .npy** — packages the mask directly in the browser as a valid NumPy 1.0 `.npy` file (no round-trip); uses `DecompressionStream` (Chrome ≥ 80 / Firefox ≥ 113) to inflate zlib in-browser
+- Mask is **saved automatically** to `backend/saved_masks/mask_<roi_name>_<timestamp>.npy` on the server; result card shows the filename and a direct **⬇ Download .npy** link via `GET /saved-masks/{filename}`
 
 ---
 

@@ -433,8 +433,7 @@ async function exportRtstruct() {
 
 // ── ROI → 3D Field Mask ───────────────────────────────────────────────────────
 
-let _fmLastResult = null;   // { shape, annotated_slices, interpolated_slices,
-                             //   voxel_count, field_mask_b64 }
+let _fmLastResult = null;   // last response from /roi-field-mask
 
 // Populate the ROI file picker from the backend.
 async function fmRefreshFiles() {
@@ -480,143 +479,30 @@ async function generateFieldMask() {
     const data = await r.json();
     _fmLastResult = data;
 
+    // Show saved filename
+    const savedEl = document.getElementById('fmSavedMsg');
+    savedEl.textContent = `✓ Saved to backend: ${data.saved_file}`;
+
+    // Show stats
     const [nz, nr, nc] = data.shape;
     document.getElementById('fmStats').innerHTML =
-      `<b>Shape:</b> ${nz} × ${nr} × ${nc} (z × row × col)<br>` +
-      `<b>Annotated slices:</b> ${data.annotated_slices}<br>` +
-      `<b>Interpolated slices:</b> ${data.interpolated_slices}<br>` +
-      `<b>Voxel count:</b> ${data.voxel_count.toLocaleString()}`;
+      `<b>Shape:</b> ${nz} × ${nr} × ${nc}&ensp;` +
+      `<b>Annotated:</b> ${data.annotated_slices} slices&ensp;` +
+      `<b>Interpolated:</b> ${data.interpolated_slices} slices&ensp;` +
+      `<b>Voxels:</b> ${data.voxel_count.toLocaleString()}`;
+
+    // Wire download link directly to backend
+    const dlLink = document.getElementById('fmDownloadLink');
+    dlLink.href  = `${API}/saved-masks/${encodeURIComponent(data.saved_file)}`;
+    dlLink.style.display = 'inline-block';
 
     document.getElementById('fmResult').style.display = 'block';
-    _fmSetStatus('Done.', '#81c784');
+    _fmSetStatus('Done — mask saved on server.', '#81c784');
 
   } catch (err) {
     _fmSetStatus(`Error: ${err.message}`, '#ef5350');
   }
 }
-
-/**
- * Pack the received data into a minimal .npy file (NumPy format 1.0) and
- * trigger a browser download — no server round-trip needed.
- *
- * NumPy v1.0 layout:
- *   \x93NUMPY  (6 bytes magic)
- *   \x01\x00   (version 1.0)
- *   HEADER_LEN (2 bytes LE uint16)
- *   header     (ASCII dict, padded to 64-byte alignment with spaces + \n)
- *   data       (C-order uint8 array)
- */
-function downloadFieldMask() {
-  if (!_fmLastResult) { alert('Generate the mask first.'); return; }
-
-  const { shape, field_mask_b64 } = _fmLastResult;
-
-  // Decode base64 → inflate zlib
-  const b64Bytes  = Uint8Array.from(atob(field_mask_b64), c => c.charCodeAt(0));
-  const inflated  = _zlibInflate(b64Bytes);   // Uint8Array of raw mask bytes
-
-  // Build NumPy header
-  const headerStr = `{'descr': '|u1', 'fortran_order': False, 'shape': (${shape.join(', ')},), }`;
-  const MAGIC     = [0x93, 0x4e, 0x55, 0x4d, 0x50, 0x59, 0x01, 0x00]; // \x93NUMPY v1.0
-  // Header must be padded so that total header block (10 + HEADER_LEN) % 64 == 0
-  const prefixLen = 10; // magic(6) + version(2) + header_len(2)
-  let   padded    = headerStr;
-  while ((prefixLen + padded.length + 1) % 64 !== 0) padded += ' ';
-  padded += '\n';
-
-  const headerBytes = new TextEncoder().encode(padded);
-  const lenBytes    = new Uint8Array([headerBytes.length & 0xff, (headerBytes.length >> 8) & 0xff]);
-
-  const total = MAGIC.length + lenBytes.length + headerBytes.length + inflated.length;
-  const out   = new Uint8Array(total);
-  let   pos   = 0;
-  out.set(new Uint8Array(MAGIC), pos);         pos += MAGIC.length;
-  out.set(lenBytes,               pos);        pos += 2;
-  out.set(headerBytes,            pos);        pos += headerBytes.length;
-  out.set(inflated,               pos);
-
-  const blob = new Blob([out], { type: 'application/octet-stream' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = 'field_mask.npy';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-/**
- * Minimal zlib inflate using DecompressionStream (supported in all modern browsers).
- * Falls back to returning the raw bytes unchanged if DecompressionStream is unavailable.
- */
-async function _zlibInflateAsync(data) {
-  try {
-    const ds     = new DecompressionStream('deflate');
-    const writer = ds.writable.getWriter();
-    const reader = ds.readable.getReader();
-    // zlib has a 2-byte header (CMF + FLG) — strip it so raw deflate works
-    writer.write(data.slice(2));
-    writer.close();
-    const chunks = [];
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-    }
-    const total  = chunks.reduce((n, c) => n + c.length, 0);
-    const result = new Uint8Array(total);
-    let   offset = 0;
-    for (const c of chunks) { result.set(c, offset); offset += c.length; }
-    return result;
-  } catch (_) {
-    return data;
-  }
-}
-
-// Synchronous wrapper — replaces raw bytes immediately when resolved.
-// We keep downloadFieldMask() synchronous but inflate async behind the scenes.
-function _zlibInflate(data) {
-  // Return a placeholder; actual download will happen after inflate resolves.
-  // Re-implement downloadFieldMask to be async:
-  return data;   // unused — see downloadFieldMask override below
-}
-
-// Override downloadFieldMask with the async version
-(function () {
-  const _orig = window.downloadFieldMask;   // not used
-  window.downloadFieldMask = async function () {
-    if (!_fmLastResult) { alert('Generate the mask first.'); return; }
-
-    const { shape, field_mask_b64 } = _fmLastResult;
-    const b64Bytes = Uint8Array.from(atob(field_mask_b64), c => c.charCodeAt(0));
-    const inflated = await _zlibInflateAsync(b64Bytes);
-
-    const headerStr = `{'descr': '|u1', 'fortran_order': False, 'shape': (${shape.join(', ')},), }`;
-    const MAGIC     = [0x93, 0x4e, 0x55, 0x4d, 0x50, 0x59, 0x01, 0x00];
-    const prefixLen = 10;
-    let   padded    = headerStr;
-    while ((prefixLen + padded.length + 1) % 64 !== 0) padded += ' ';
-    padded += '\n';
-
-    const headerBytes = new TextEncoder().encode(padded);
-    const lenBytes    = new Uint8Array([headerBytes.length & 0xff, (headerBytes.length >> 8) & 0xff]);
-
-    const total = MAGIC.length + lenBytes.length + headerBytes.length + inflated.length;
-    const out   = new Uint8Array(total);
-    let   pos   = 0;
-    out.set(new Uint8Array(MAGIC), pos);  pos += MAGIC.length;
-    out.set(lenBytes,               pos); pos += 2;
-    out.set(headerBytes,            pos); pos += headerBytes.length;
-    out.set(inflated,               pos);
-
-    const blob = new Blob([out], { type: 'application/octet-stream' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = 'field_mask.npy';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-})();
 
 function _fmSetStatus(text, color) {
   const el = document.getElementById('fmStatus');
