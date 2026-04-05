@@ -105,15 +105,49 @@
 </head>
 <body>
 
-  <h2>🤖 AI Organ Segmentation</h2>
-  <div class="subtitle" id="seriesInfo">Powered by TotalSegmentator</div>
+  <h2>AI Organ Segmentation</h2>
+  <div class="subtitle" id="seriesInfo">TotalSegmentator · Platipy · MONAI · MedSAM</div>
+
+  <!-- Method selector -->
+  <div class="card" style="margin-bottom:12px;">
+    <div class="card-title">Method</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+      <button class="quality-btn active" id="btnMethodTS"
+              onclick="setMethod('totalsegmentator')">TotalSegmentator</button>
+      <button class="quality-btn" id="btnMethodPlatipy"
+              onclick="setMethod('platipy')">Platipy</button>
+      <button class="quality-btn" id="btnMethodTSHeart"
+              onclick="setMethod('ts-heart')">TS Cardiac HR</button>
+      <button class="quality-btn" id="btnMethodMonai"
+              onclick="setMethod('monai')">MONAI</button>
+      <button class="quality-btn" id="btnMethodMedSAM"
+              onclick="setMethod('medsam')">MedSAM</button>
+    </div>
+    <span id="methodDesc" style="font-size:11px;color:#555;">
+      Heart + Lungs — GPU accelerated
+    </span>
+  </div>
+
+  <!-- Status badges -->
   <div id="gpuBadge" style="display:none;font-size:11px;font-weight:700;
+       padding:3px 10px;border-radius:4px;border:1px solid;
+       letter-spacing:0.5px;margin-bottom:8px;"></div>
+  <div id="platipyBadge" style="display:none;font-size:11px;font-weight:700;
+       padding:3px 10px;border-radius:4px;border:1px solid;
+       letter-spacing:0.5px;margin-bottom:8px;"></div>
+  <div id="tsHeartBadge" style="display:none;font-size:11px;font-weight:700;
+       padding:3px 10px;border-radius:4px;border:1px solid;
+       letter-spacing:0.5px;margin-bottom:8px;"></div>
+  <div id="monaiBadge" style="display:none;font-size:11px;font-weight:700;
+       padding:3px 10px;border-radius:4px;border:1px solid;
+       letter-spacing:0.5px;margin-bottom:8px;"></div>
+  <div id="medsamBadge" style="display:none;font-size:11px;font-weight:700;
        padding:3px 10px;border-radius:4px;border:1px solid;
        letter-spacing:0.5px;margin-bottom:14px;"></div>
 
-  <!-- Install notice (shown if TotalSegmentator not installed) -->
+  <!-- Install notice (TotalSegmentator) -->
   <div id="installNotice">
-    <div class="title">⚠ TotalSegmentator not installed</div>
+    <div class="title">TotalSegmentator not installed</div>
     Run the following in your backend virtualenv, then reload this page:
     <code>pip install TotalSegmentator</code>
     <div class="note">
@@ -122,14 +156,78 @@
     </div>
   </div>
 
-  <!-- Configuration -->
+  <!-- Install notice (Platipy) -->
+  <div id="platipyNotice" style="display:none;background:#1a2a1a;border:1px solid #2e4a2e;
+       border-radius:8px;padding:14px;margin-bottom:16px;">
+    <div style="color:#81c784;font-size:13px;font-weight:700;margin-bottom:8px;">
+      Platipy [cardiac] not installed
+    </div>
+    <code style="display:block;background:#111;color:#4fc3f7;font-size:12px;
+          padding:8px 10px;border-radius:4px;margin-top:6px;user-select:all;">
+      pip install "platipy[cardiac]"</code>
+    <div style="font-size:11px;color:#666;margin-top:6px;">
+      Atlas (~50 MB) is downloaded automatically on first run and cached locally.
+    </div>
+  </div>
+
+  <!-- Install notice (TS Cardiac HR) -->
+  <div id="tsHeartNotice" style="display:none;background:#1a2a2a;border:1px solid #2e4a4a;
+       border-radius:8px;padding:14px;margin-bottom:16px;">
+    <div style="color:#4fc3f7;font-size:13px;font-weight:700;margin-bottom:8px;">
+      TotalSegmentator research licence required
+    </div>
+    heartchambers_highres is a licensed TS task. Get a <strong>free</strong> research key:
+    <code style="display:block;background:#111;color:#4fc3f7;font-size:12px;
+          padding:8px 10px;border-radius:4px;margin-top:6px;user-select:all;">
+      totalseg_get_license_key --email you@example.com</code>
+    <div style="font-size:11px;color:#666;margin-top:6px;">
+      TotalSegmentator must already be installed. Licence is stored locally.
+    </div>
+  </div>
+
+  <!-- Install notice (MONAI) -->
+  <div id="monaiNotice" style="display:none;background:#1a2a1a;border:1px solid #2e4a2e;
+       border-radius:8px;padding:14px;margin-bottom:16px;">
+    <div style="color:#81c784;font-size:13px;font-weight:700;margin-bottom:8px;">
+      MONAI not installed
+    </div>
+    <code style="display:block;background:#111;color:#4fc3f7;font-size:12px;
+          padding:8px 10px;border-radius:4px;margin-top:6px;user-select:all;">
+      pip install 'monai[all]'</code>
+    <div style="font-size:11px;color:#666;margin-top:6px;">
+      Uses the <strong style="color:#aaa;">wholeBody_ct_segmentation</strong> bundle (~1 GB,
+      104-structure SegResNet). Downloaded automatically on first run and cached in
+      <code style="color:#4fc3f7;background:#111;padding:1px 4px;border-radius:3px;">
+        ~/.cache/monai_bundles/</code>.
+    </div>
+  </div>
+
+  <!-- Install notice (MedSAM) -->
+  <div id="medsamNotice" style="display:none;background:#1a2a1a;border:1px solid #2e4a2e;
+       border-radius:8px;padding:14px;margin-bottom:16px;">
+    <div style="color:#81c784;font-size:13px;font-weight:700;margin-bottom:8px;">
+      MedSAM dependencies not installed
+    </div>
+    <code style="display:block;background:#111;color:#4fc3f7;font-size:12px;
+          padding:8px 10px;border-radius:4px;margin-top:6px;user-select:all;">
+      pip install transformers Pillow</code>
+    <div style="font-size:11px;color:#666;margin-top:6px;">
+      MedSAM-ViT-B (~375 MB) is downloaded from HuggingFace on first run and cached in
+      <code style="color:#4fc3f7;background:#111;padding:1px 4px;border-radius:3px;">
+        ~/.cache/huggingface/</code>.
+    </div>
+  </div>
+
+  <!-- Configuration — TotalSegmentator -->
   <div class="card" id="configCard">
-    <div class="card-title">Structures to segment</div>
-    <div class="organ-grid">
+    <div class="card-title" id="configStructTitle">Structures to segment</div>
+
+    <!-- TS organs (ts + ts-heart share these but ts-heart shows heart-only note) -->
+    <div id="tsOrganGrid" class="organ-grid">
       <div class="organ-chip">
         <input type="checkbox" id="chkHeart" checked>
         <span class="dot" style="background:#ef5350;"></span>
-        <label for="chkHeart">Heart</label>
+        <label for="chkHeart">Heart + vessels</label>
       </div>
       <div class="organ-chip">
         <input type="checkbox" id="chkLeftLung" checked>
@@ -143,16 +241,28 @@
       </div>
     </div>
 
-    <div class="card-title" style="margin-top:16px;">Quality</div>
-    <div class="quality-row">
-      <button class="quality-btn active" id="btnFast" onclick="setQuality(true)">Fast (~30 s)</button>
-      <button class="quality-btn" id="btnFull" onclick="setQuality(false)">Full (~3–5 min)</button>
-      <span class="quality-hint" id="qualityHint">3 mm isotropic, good for planning</span>
+    <!-- Heart-only info (Platipy / ts-heart / monai / medsam) -->
+    <div id="heartOnlyInfo" style="display:none;font-size:12px;color:#aaa;line-height:1.6;"></div>
+
+    <!-- Quality (TS only) -->
+    <div id="qualitySection" style="margin-top:16px;">
+      <div class="card-title">Quality</div>
+      <div class="quality-row">
+        <button class="quality-btn active" id="btnFast" onclick="setQuality(true)">Fast (~30 s)</button>
+        <button class="quality-btn" id="btnFull" onclick="setQuality(false)">Full (~3–5 min)</button>
+        <span class="quality-hint" id="qualityHint">3 mm isotropic, good for planning</span>
+      </div>
+      <div style="font-size:11px;color:#555;margin-top:8px;line-height:1.5;">
+        Model weights cached in
+        <code style="color:#4fc3f7;background:#111;padding:1px 4px;border-radius:3px;">
+          ~/.totalsegmentator/</code> after first download.<br>
+        Full mode downloads 3 models (~1 GB total, one-time).
+      </div>
     </div>
-    <div style="font-size:11px;color:#555;margin-top:8px;line-height:1.5;">
-      ⓘ Model weights cached in <code style="color:#4fc3f7;background:#111;padding:1px 4px;border-radius:3px;">~/.totalsegmentator/</code> after first download — never re-downloaded.<br>
-      Full mode downloads 3 models (~1 GB total, one-time).
-    </div>
+
+    <!-- Timing notes for heart-only methods -->
+    <div id="heartMethodNote" style="display:none;margin-top:8px;font-size:11px;
+         color:#555;line-height:1.5;"></div>
   </div>
 
   <!-- Run button + progress -->
@@ -180,6 +290,45 @@
       </button>
     </div>
     <div id="savedMsg" style="font-size:11px;color:#666;margin-top:8px;display:none;"></div>
+  </div>
+
+  <!-- ROI → 3D Field Mask -->
+  <div class="card" style="margin-top:16px;">
+    <div class="card-title">ROI → 3D Binary Field Mask</div>
+    <div style="font-size:12px;color:#888;margin-bottom:10px;line-height:1.5;">
+      Convert polygon ROIs (same name, multiple slices) to a full 3-D binary volume
+      with smooth SDT-interpolation between annotated slices.
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+      <select id="fmRoiFileSelect"
+              style="flex:1;min-width:160px;background:#2a2a2a;color:#ccc;
+                     border:1px solid #444;border-radius:4px;padding:5px 8px;font-size:12px;">
+        <option value="">— saved ROI file —</option>
+      </select>
+      <button class="action-btn" onclick="fmRefreshFiles()" style="white-space:nowrap;">↻ Refresh</button>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
+      <input id="fmRoiName" type="text" placeholder="ROI name (blank = first found)"
+             style="flex:1;background:#2a2a2a;color:#ccc;border:1px solid #444;
+                    border-radius:4px;padding:5px 8px;font-size:12px;" />
+      <button class="action-btn primary" onclick="generateFieldMask()" style="white-space:nowrap;">
+        ▶ Generate
+      </button>
+    </div>
+
+    <div id="fmStatus" style="display:none;font-size:12px;color:#aaa;padding:6px 10px;
+         background:#1a1a1a;border-radius:4px;border-left:3px solid #444;
+         margin-bottom:8px;font-family:monospace;"></div>
+
+    <div id="fmResult" style="display:none;">
+      <div style="font-size:11px;color:#666;margin-bottom:6px;">Field mask generated</div>
+      <div id="fmStats" style="font-size:12px;color:#ccc;line-height:1.8;"></div>
+      <div class="action-row">
+        <button class="action-btn primary" onclick="downloadFieldMask()">⬇ Download .npy</button>
+      </div>
+    </div>
   </div>
 
   <script src="roi-save.js"></script>

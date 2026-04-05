@@ -17,6 +17,9 @@ from functools import partial
 import numpy as np
 import scipy.ndimage as ndi
 from skimage.measure import find_contours
+from skimage.draw import polygon as ski_polygon
+import base64
+import zlib
 
 app = FastAPI()
 
@@ -1893,6 +1896,99 @@ def check_totalseg():
     return info
 
 
+@app.get("/check-platipy")
+def check_platipy():
+    """Return whether Platipy is installed and its cardiac atlas is downloaded."""
+    import pathlib
+    info = {"installed": False, "version": None, "atlas_ready": False, "atlas_path": None}
+    try:
+        import platipy
+        info["installed"] = True
+        info["version"]   = getattr(platipy, "__version__", "unknown")
+        from platipy.imaging.projects.cardiac.run import run_cardiac_segmentation
+        import inspect
+        sig = inspect.signature(run_cardiac_segmentation)
+        atlas_path = pathlib.Path(
+            sig.parameters["settings"].default["atlas_settings"]["atlas_path"]
+        )
+        info["atlas_path"]  = str(atlas_path)
+        info["atlas_ready"] = atlas_path.exists() and any(atlas_path.iterdir())
+    except Exception:
+        pass
+    return info
+
+
+@app.get("/check-ts-heart")
+def check_ts_heart():
+    """Check if TS is installed and whether heartchambers_highres license is configured."""
+    import pathlib
+    info = {"installed": False, "version": None, "license": None, "gpu": None}
+    try:
+        import totalsegmentator
+        info["installed"] = True
+        info["version"]   = getattr(totalsegmentator, "__version__", "unknown")
+        # Check for research license
+        try:
+            from totalsegmentator.config import get_config_key
+            lic = get_config_key("license")
+            info["license"] = bool(lic)
+        except Exception:
+            info["license"] = None  # unknown — will be apparent from first run
+    except ImportError:
+        pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            info["gpu"] = {"name": torch.cuda.get_device_name(0),
+                           "memory_mb": props.total_memory // (1024 * 1024)}
+    except Exception:
+        pass
+    return info
+
+
+@app.get("/check-monai")
+def check_monai():
+    """Check if MONAI is installed and whether the wholeBody_ct_segmentation bundle is cached."""
+    import pathlib
+    info = {"installed": False, "version": None, "bundle_ready": False, "bundle_path": None}
+    try:
+        import monai
+        info["installed"] = True
+        info["version"]   = getattr(monai, "__version__", "unknown")
+        cache = pathlib.Path.home() / ".cache" / "monai_bundles" / "wholeBody_ct_segmentation"
+        info["bundle_ready"] = cache.exists() and any(cache.iterdir())
+        info["bundle_path"]  = str(cache)
+    except ImportError:
+        pass
+    return info
+
+
+@app.get("/check-medsam")
+def check_medsam():
+    """Check if HuggingFace transformers is installed and MedSAM weights are cached."""
+    import pathlib
+    info = {"installed": False, "version": None, "model_cached": False, "gpu": None}
+    try:
+        import transformers
+        info["installed"] = True
+        info["version"]   = getattr(transformers, "__version__", "unknown")
+        hf_hub = pathlib.Path.home() / ".cache" / "huggingface" / "hub"
+        cached = list(hf_hub.glob("models--flaviagiammarino--medsam*")) if hf_hub.exists() else []
+        info["model_cached"] = bool(cached)
+    except ImportError:
+        pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            info["gpu"] = {"name": torch.cuda.get_device_name(0),
+                           "memory_mb": props.total_memory // (1024 * 1024)}
+    except Exception:
+        pass
+    return info
+
+
 # ── ML segmentation job store ─────────────────────────────────────────────────
 # Jobs are keyed by UUID; each entry: {status, pct, stage, result, error}
 _ml_jobs: dict = {}
@@ -1961,58 +2057,50 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
         ct_img = reader.Execute()
 
         # ── 5. Run TotalSegmentator via subprocess ────────────────────────────
-        # Using a subprocess lets us capture stdout line-by-line so we can
-        # show the real download/inference progress in the UI instead of a
-        # fake ticker.  TotalSegmentator prints tqdm lines like:
-        #   "Downloading: 45%|████ | 60.0M/135M …"
-        #   "Predicting…"  /  "Resampling…"
+        # Single pass with the freely available "total" task.
+        # Heart ROI = label 51 (heart body) + all great-vessel labels that
+        # connect directly to the heart (aorta, SVC, IVC, pulmonary veins,
+        # subclavians, carotids, brachiocephalic veins, left atrial appendage).
         import tempfile, pathlib, subprocess, sys, re
 
         mode_str = "fast" if fast else "full quality"
         _upd(18, f"Preparing CT volume for TotalSegmentator [{gpu_label}]…")
 
+        # Cardiac + great-vessel labels in 'total' task (all freely available)
+        # 51=heart  52=aorta  53=pulmonary_vein  54=brachiocephalic_trunk
+        # 55=subclavian_R  56=subclavian_L  57=carotid_R  58=carotid_L
+        # 59=brachiocephalic_vein_L  60=brachiocephalic_vein_R
+        # 61=atrial_appendage_left  62=superior_vena_cava  63=inferior_vena_cava
+        HEART_LABELS = {51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63}
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            in_path = os.path.join(tmpdir, "ct.nii.gz")
-            out_dir = pathlib.Path(tmpdir) / "seg_out"
-            out_dir.mkdir()
+            in_path  = os.path.join(tmpdir, "ct.nii.gz")
+            seg_path = os.path.join(tmpdir, "segmentation.nii.gz")
 
             _upd(20, "Writing NIfTI file…")
             sitk.WriteImage(ct_img, in_path)
 
-            cmd = [
-                sys.executable, "-m", "totalsegmentator",
-                "-i", in_path,
-                "-o", str(out_dir),
-                "--task", "total",
-                "--device", device,
-            ]
-            if fast:
-                cmd.append("--fast")
-
-            def _run_proc(try_device):
-                """Run TotalSegmentator subprocess, return (seg_arr, captured_lines)."""
-                # Find the CLI binary next to the current Python interpreter.
-                # TotalSegmentator installs as "TotalSegmentator" (capital T);
-                # it has no __main__.py so `python -m totalsegmentator` fails.
+            def _find_ts_bin():
                 bin_dir = os.path.dirname(sys.executable)
-                ts_bin  = None
                 for name in ("TotalSegmentator", "totalsegmentator"):
                     candidate = os.path.join(bin_dir, name)
                     if os.path.isfile(candidate):
-                        ts_bin = candidate
-                        break
-                if ts_bin is None:
-                    import shutil
-                    ts_bin = (shutil.which("TotalSegmentator") or
-                              shutil.which("totalsegmentator") or
-                              "TotalSegmentator")
+                        return candidate
+                import shutil
+                return (shutil.which("TotalSegmentator") or
+                        shutil.which("totalsegmentator") or
+                        "TotalSegmentator")
 
+            def _run_ts_proc(try_device):
+                """Run TotalSegmentator subprocess; return (rc, tail)."""
+                ts_bin  = _find_ts_bin()
                 run_cmd = [
                     ts_bin,
                     "-i", in_path,
-                    "-o", str(out_dir),
+                    "-o", seg_path,
                     "--task", "total",
                     "--device", try_device,
+                    "--ml",
                 ]
                 if fast:
                     run_cmd.append("--fast")
@@ -2027,22 +2115,21 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
                     text=True,
                     bufsize=1,
                 )
-                tail = []   # last 30 lines for error reporting
+                tail = []
 
                 for raw in p.stdout:
                     line = raw.strip()
                     if not line:
                         continue
-                    print(f"[TS] {line}", flush=True)   # always visible in server terminal
+                    print(f"[TS] {line}", flush=True)
                     tail.append(line)
                     if len(tail) > 30:
                         tail.pop(0)
 
-                    # Download progress: "Downloading: 45%|... 60M/135M ..."
                     m = re.search(r'Downloading[^:]*:\s*(\d+)%', line)
                     if m:
-                        dl = int(m.group(1))
-                        pct = 22 + int(dl * 0.50)   # map 0-100 → 22-72%
+                        dl  = int(m.group(1))
+                        pct = 22 + int(dl * 0.50)
                         sm  = re.search(r'([\d.]+[MG])\s*/\s*([\d.]+[MG])', line)
                         ss  = f" ({sm.group(1)}/{sm.group(2)})" if sm else ""
                         _upd(pct, f"Downloading weights: {dl}%{ss} (cached after this)…")
@@ -2059,16 +2146,13 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
                 rc = p.wait()
                 return rc, tail
 
-            # Try GPU first; fall back to CPU if it fails.
-            rc, tail = _run_proc(device)
+            rc, tail = _run_ts_proc(device)
             if rc != 0 and device == "gpu":
                 print("[ML-Seg] GPU run failed — retrying on CPU…", flush=True)
                 _upd(22, "GPU failed — retrying on CPU…")
-                # Clear output dir before retry
-                import shutil
-                shutil.rmtree(str(out_dir), ignore_errors=True)
-                out_dir.mkdir()
-                rc, tail = _run_proc("cpu")
+                if os.path.exists(seg_path):
+                    os.remove(seg_path)
+                rc, tail = _run_ts_proc("cpu")
 
             if rc != 0:
                 snippet = '\n'.join(tail[-15:]) if tail else '(no output captured)'
@@ -2077,66 +2161,89 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
                 )
 
             _upd(82, "Reading segmentation output…")
-            seg_path = str(out_dir / "segmentation.nii.gz")
             if not os.path.exists(seg_path):
-                nii_files = [f for f in os.listdir(out_dir) if f.endswith(".nii.gz")]
-                if not nii_files:
-                    raise RuntimeError("TotalSegmentator produced no output file.")
-                seg_path = str(out_dir / nii_files[0])
-            seg_img = sitk.ReadImage(seg_path)
-            seg_arr = sitk.GetArrayFromImage(seg_img)   # (nz, nr, nc)
+                raise RuntimeError("TotalSegmentator produced no output file.")
+            seg_sitk = sitk.ReadImage(seg_path)
+            seg_arr  = sitk.GetArrayFromImage(seg_sitk)   # (nz,nr,nc)
+            seg_spacing = seg_sitk.GetSpacing()            # (dx, dy, dz) in mm
 
-        # ── 6. Look up label IDs ──────────────────────────────────────────────
-        _upd(82, "Extracting organ masks…")
+        # ── 6. Build structure masks ──────────────────────────────────────────
+        _upd(84, "Extracting organ masks…")
 
         present_set = set(int(x) for x in np.unique(seg_arr) if x != 0)
-        print(f"[ML-Seg] Labels present in output: {sorted(present_set)}", flush=True)
+        print(f"[ML-Seg] Labels present: {sorted(present_set)}", flush=True)
 
-        # Build inv from only the task-specific class_map (not merged across all
-        # tasks — merging causes label-ID conflicts between total/total_v1/etc.).
-        inv = {}   # label_id (int) → structure_name (str)
         try:
-            from totalsegmentator.map_to_binary import class_map
-            # Priority order: the task we actually ran.
-            for task_key in ("total", "total_v1", "total_mr"):
-                cmap = class_map.get(task_key, {})
-                if cmap:
-                    inv = {int(lid): name for lid, name in cmap.items()}
-                    print(f"[ML-Seg] Using class_map['{task_key}']: "
-                          f"{len(inv)} structures", flush=True)
-                    break
+            from totalsegmentator.map_to_binary import class_map as _cm
+            total_inv = {int(lid): name for lid, name in _cm.get("total", {}).items()}
         except Exception as e:
             print(f"[ML-Seg] class_map import failed: {e}", flush=True)
+            total_inv = {}
 
-        # Find heart/lung labels by name in the present set.
         def _labels_for(keywords):
-            return [lid for lid, name in inv.items()
+            return [lid for lid, name in total_inv.items()
                     if lid in present_set and all(k in name.lower() for k in keywords)]
 
-        WANT = {
-            "Heart":      _labels_for(["heart"]),
-            "Left Lung":  _labels_for(["lung", "left"]),
-            "Right Lung": _labels_for(["lung", "right"]),
-        }
+        # Heart: label 51 (cardiac body) + all great vessels listed in HEART_LABELS
+        heart_ids = sorted(HEART_LABELS & present_set)
+        if not heart_ids:
+            heart_ids = [l for l in [51, 52, 62, 63] if l in present_set]
+        print(f"[ML-Seg] Heart labels used: {heart_ids}", flush=True)
 
-        # Verified fallbacks per task (from class_map inspection):
-        #   total  (v2): heart=51, left_lung=10+11, right_lung=12+13+14
-        #   total_v1:    heart chambers=44-48, left=13+14, right=15+16+17
-        FALLBACKS = {
-            "Heart":      [[51], [44, 45, 46, 47, 48]],
-            "Left Lung":  [[10, 11], [13, 14]],
-            "Right Lung": [[12, 13, 14], [15, 16, 17]],
-        }
-        for sname in WANT:
-            if not WANT[sname]:
-                for fb in FALLBACKS[sname]:
-                    valid = [l for l in fb if l in present_set]
-                    if valid:
-                        WANT[sname] = valid
-                        print(f"[ML-Seg] {sname}: using fallback IDs {valid}", flush=True)
-                        break
+        # Lungs
+        ll_ids = _labels_for(["lung", "left"])  or [l for l in [10, 11, 13, 14] if l in present_set]
+        rl_ids = _labels_for(["lung", "right"]) or [l for l in [12, 13, 14, 15, 16, 17] if l in present_set]
+        print(f"[ML-Seg] Lung IDs — Left:{ll_ids}  Right:{rl_ids}", flush=True)
 
-        print(f"[ML-Seg] Final structure→labels: {WANT}", flush=True)
+        def _build_mask(ids):
+            m = np.zeros(seg_arr.shape, dtype=bool)
+            for lid in ids:
+                m |= (seg_arr == lid)
+            return m
+
+        heart_raw = _build_mask(heart_ids)
+
+        # Post-process heart mask per axial slice:
+        #   1. Binary closing (20 mm radius) — bridges gaps between independently-
+        #      segmented structures (heart body, vessels, appendage etc.)
+        #   2. fill_holes — fills any enclosed cavities
+        #   3. Convex hull — fills remaining concavities; the heart in axial
+        #      cross-section is approximately convex, so this captures the right
+        #      ventricle and other areas the TS label tends to undercut
+        try:
+            from scipy.ndimage import binary_closing, binary_fill_holes
+            from skimage.morphology import disk, convex_hull_image
+
+            px_spacing      = seg_spacing[0]   # dx ≈ dy in mm
+            close_radius_px = max(1, int(round(20.0 / px_spacing)))
+            struct2d        = disk(close_radius_px)
+
+            heart_closed = np.zeros_like(heart_raw)
+            for z in range(heart_raw.shape[0]):
+                sl = heart_raw[z]
+                if not sl.any():
+                    continue
+                # Step 1 + 2: close + fill
+                cl = binary_fill_holes(binary_closing(sl, structure=struct2d))
+                # Step 3: convex hull to capture concave undercuts (RV, etc.)
+                try:
+                    cl = convex_hull_image(cl)
+                except Exception:
+                    pass   # convex_hull_image fails on degenerate slices
+                heart_closed[z] = cl
+
+            heart_mask = heart_closed
+            print(f"[ML-Seg] Heart post-process: close={close_radius_px}px "
+                  f"({px_spacing:.2f} mm/px) + fill_holes + convex_hull", flush=True)
+        except Exception as e:
+            print(f"[ML-Seg] Heart post-process skipped: {e}", flush=True)
+            heart_mask = heart_raw
+
+        WANT_MASKS = {
+            "Heart":      heart_mask,
+            "Left Lung":  _build_mask(ll_ids),
+            "Right Lung": _build_mask(rl_ids),
+        }
 
         # ── 7. Build contours ─────────────────────────────────────────────────
         _upd(88, "Building contours…")
@@ -2145,10 +2252,7 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
         roi_list = []
         ts_now   = int(_time.time() * 1000)
 
-        for name, label_ids in WANT.items():
-            mask = np.zeros(seg_arr.shape, dtype=bool)
-            for lid in label_ids:
-                mask |= (seg_arr == lid)
+        for name, mask in WANT_MASKS.items():
             contours = _mask_to_contours(mask)
             results[name] = contours
             color = COLORS.get(name, "#ffcc44")
@@ -2181,13 +2285,907 @@ def _ml_run_sync(job_id: str, series_uid: str, fast: bool):
         _ml_set(job_id, status="error", stage="Failed", error=str(exc))
 
 
+# ── Platipy cardiac segmentation ──────────────────────────────────────────────
+
+def _ml_run_platipy_sync(job_id: str, series_uid: str):
+    """Atlas-based cardiac segmentation via Platipy. CPU-only, ~5-15 min."""
+    import time as _time, pathlib
+
+    def _upd(pct, stage):
+        _ml_set(job_id, pct=pct, stage=stage)
+
+    try:
+        _upd(2, "Checking Platipy…")
+        try:
+            import SimpleITK as sitk
+            from platipy.imaging.projects.cardiac.run import (
+                run_cardiac_segmentation, install_open_atlas
+            )
+        except ImportError as e:
+            raise RuntimeError(
+                f"Platipy [cardiac] not installed.\n"
+                f"Run:  pip install 'platipy[cardiac]'\n{e}"
+            )
+
+        # ── Ensure atlas is downloaded ────────────────────────────────────────
+        import inspect
+        sig        = inspect.signature(run_cardiac_segmentation)
+        atlas_path = pathlib.Path(
+            sig.parameters["settings"].default["atlas_settings"]["atlas_path"]
+        )
+        if not atlas_path.exists() or not any(atlas_path.iterdir()):
+            import shutil as _shutil
+            for attempt in range(1, 4):
+                try:
+                    # Clean up any partial download before each attempt
+                    if atlas_path.exists():
+                        _shutil.rmtree(str(atlas_path), ignore_errors=True)
+                    _upd(4, f"Downloading Platipy cardiac atlas (~50 MB, attempt {attempt}/3)…")
+                    print(f"[Platipy] Atlas download attempt {attempt}/3…", flush=True)
+                    install_open_atlas(atlas_path)
+                    print(f"[Platipy] Atlas installed to {atlas_path}", flush=True)
+                    break
+                except Exception as dl_err:
+                    print(f"[Platipy] Attempt {attempt} failed: {dl_err}", flush=True)
+                    if attempt == 3:
+                        raise RuntimeError(
+                            f"Platipy atlas download failed after 3 attempts.\n{dl_err}"
+                        )
+
+        # ── Collect DICOM files ───────────────────────────────────────────────
+        _upd(8, "Scanning DICOM files…")
+        entries = []
+        for fname in os.listdir(UPLOAD_DIR):
+            fpath = os.path.join(UPLOAD_DIR, fname)
+            try:
+                ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+                if getattr(ds, "Modality", "") not in ("CT", "MR"):
+                    continue
+                if series_uid and str(getattr(ds, "SeriesInstanceUID", "")) != series_uid:
+                    continue
+                entries.append((int(getattr(ds, "InstanceNumber", 0)), fpath))
+            except Exception:
+                pass
+        if not entries:
+            raise RuntimeError("No CT slices found for this series.")
+        entries.sort(key=lambda x: x[0])
+        fpaths = [p for _, p in entries]
+
+        # ── Build SimpleITK image ─────────────────────────────────────────────
+        _upd(12, f"Loading {len(fpaths)} slices…")
+        reader = sitk.ImageSeriesReader()
+        reader.SetFileNames(fpaths)
+        ct_img = reader.Execute()
+
+        # ── Build settings for the open atlas format ─────────────────────────
+        # The default run_cardiac_segmentation settings expect the OLD numbered
+        # atlas (Case_03/Images/...).  The open atlas downloaded from Zenodo uses
+        # LUNG1-*/IMAGES/CT.nii.gz.  We pull the correct settings directly from
+        # run_hybrid_segmentation (which ships configured for the open atlas).
+        import multiprocessing as _mp, copy as _copy
+        ncores = max(1, _mp.cpu_count())
+
+        # Build settings by deep-copying run_cardiac_segmentation's own defaults,
+        # then patching only the atlas-format fields to match the open atlas layout.
+        cs_defaults      = inspect.signature(run_cardiac_segmentation).parameters["settings"].default
+        cardiac_settings = _copy.deepcopy(dict(cs_defaults))
+
+        # Open atlas uses LUNG1-*/IMAGES/CT.nii.gz format + plain structure names
+        OPEN_STRUCTS = ["Heart", "Atrium_L", "Atrium_R",
+                        "Ventricle_L", "Ventricle_R",
+                        "A_Aorta", "A_Pulmonary", "V_Venacava_S"]
+        ATLAS_CASES  = ["LCTSC-Test-S2-201", "LCTSC-Test-S3-201",
+                        "LUNG1-002",         "LUNG1-067"]
+
+        cardiac_settings["atlas_settings"].update({
+            "atlas_path":              str(atlas_path),
+            "atlas_id_list":           ATLAS_CASES,
+            "atlas_structure_list":    OPEN_STRUCTS,
+            "atlas_image_format":      "{0}/IMAGES/CT.nii.gz",
+            "atlas_label_format":      "{0}/STRUCTURES/{1}.nii.gz",
+            "crop_atlas_to_structures": True,
+            "crop_atlas_expansion_mm": (50, 50, 50),
+            "guide_structure_name":    "Heart",
+        })
+        cardiac_settings["label_fusion_settings"]["optimal_threshold"] = {
+            s: 0.5 for s in OPEN_STRUCTS
+        }
+        cardiac_settings["geometric_segmentation_settings"]["atlas_structure_names"] = {
+            "atlas_left_ventricle":   "Ventricle_L",
+            "atlas_right_ventricle":  "Ventricle_R",
+            "atlas_left_atrium":      "Atrium_L",
+            "atlas_right_atrium":     "Atrium_R",
+            "atlas_ascending_aorta":  "A_Aorta",
+            "atlas_pulmonary_artery": "A_Pulmonary",
+            "atlas_superior_vena_cava": "V_Venacava_S",
+            "atlas_whole_heart":      "Heart",
+        }
+        cardiac_settings["postprocessing_settings"]["structures_for_binaryfillhole"]    = OPEN_STRUCTS
+        cardiac_settings["postprocessing_settings"]["structures_for_overlap_correction"] = \
+            [s for s in OPEN_STRUCTS if s != "Heart"]
+        # Disable coronary splines (vessel_spline_settings still references old names)
+        cardiac_settings["vessel_spline_settings"]["vessel_name_list"] = []
+        # Speed: fewer iterations + all cores
+        cardiac_settings["deformable_registration_settings"].update({
+            "resolution_staging": [6, 3],
+            "iteration_staging":  [100, 75],
+            "ncores":             ncores,
+        })
+        cardiac_settings["structure_guided_registration_settings"]["ncores"] = ncores
+
+        print(f"[Platipy] {len(ATLAS_CASES)} atlas cases, {ncores} cores", flush=True)
+
+        # ── Run Platipy segmentation ──────────────────────────────────────────
+        _upd(18, f"Running atlas-based cardiac segmentation ({ncores} cores, ~2–4 min)…")
+        output = run_cardiac_segmentation(ct_img, settings=cardiac_settings)
+        # returns (results_dict, prob_dict) tuple in Platipy 0.7+
+        results_sitk = output[0] if isinstance(output, tuple) else output
+        print(f"[Platipy] Structures returned: {list(results_sitk.keys())}", flush=True)
+
+        # ── Merge structures into Heart ROI ───────────────────────────────────
+        _upd(82, "Merging cardiac structures…")
+        MERGE_STRUCTS = {
+            "Heart", "Atrium_L", "Atrium_R",
+            "Ventricle_L", "Ventricle_R",
+            "A_Aorta", "A_Pulmonary", "V_Venacava_S",
+        }
+        heart_arr = None
+        found_structs = []
+        for sname, mask_sitk in results_sitk.items():
+            if sname not in MERGE_STRUCTS:
+                continue
+            arr = sitk.GetArrayFromImage(mask_sitk).astype(bool)
+            heart_arr = arr if heart_arr is None else (heart_arr | arr)
+            found_structs.append(sname)
+        print(f"[Platipy] Merged: {found_structs}", flush=True)
+
+        if heart_arr is None or not heart_arr.any():
+            raise RuntimeError(
+                "Platipy returned no cardiac structures. "
+                f"Keys returned: {list(results_sitk.keys())}"
+            )
+
+        # ── Post-processing ───────────────────────────────────────────────────
+        # 1. HU masking: remove voxels that are clearly lung/air (HU < -200).
+        #    Atlas registration often lets chamber masks bleed into lung territory.
+        # 2. 20 mm morphological closing + fill_holes to bridge gaps.
+        # 3. Per-slice convex hull to recover concave undercuts.
+        _upd(85, "Post-processing heart mask…")
+        try:
+            from scipy.ndimage import binary_closing, binary_fill_holes
+            from skimage.morphology import disk, convex_hull_image
+
+            ct_arr     = sitk.GetArrayFromImage(ct_img).astype(np.float32)
+            px_spacing = ct_img.GetSpacing()[0]
+
+            # Step 1 – remove lung/air voxels
+            heart_arr &= (ct_arr > -200)
+
+            # Step 2 – close gaps + fill holes per slice
+            close_px = max(1, int(round(20.0 / px_spacing)))
+            struct2d = disk(close_px)
+            heart_post = np.zeros_like(heart_arr)
+            for z in range(heart_arr.shape[0]):
+                sl = heart_arr[z]
+                if not sl.any():
+                    continue
+                cl = binary_fill_holes(binary_closing(sl, structure=struct2d))
+                # Step 3 – convex hull to fill RV undercuts etc.
+                try:
+                    cl = convex_hull_image(cl)
+                except Exception:
+                    pass
+                # Re-apply HU mask after hull (don't grow into lung)
+                heart_post[z] = cl & (ct_arr[z] > -200)
+
+            heart_arr = heart_post
+            print(f"[Platipy] Post-process: close={close_px}px, HU>-200 mask applied", flush=True)
+        except Exception as pp_err:
+            print(f"[Platipy] Post-process skipped: {pp_err}", flush=True)
+
+        # ── Build contours ────────────────────────────────────────────────────
+        _upd(88, "Building contours…")
+        contours = _mask_to_contours(heart_arr)
+        ts_now   = int(_time.time() * 1000)
+        roi_list = []
+        for c in contours:
+            roi_list.append({
+                "id":         ts_now + len(roi_list),
+                "name":       "Heart",
+                "slice":      c["slice"],
+                "points":     c["points"],
+                "color":      "#ef5350",
+                "source":     "platipy",
+                "plane":      "axial",
+                "canvasId":   "axialCanvas",
+                "planeIndex": c["slice"],
+            })
+
+        result_dict = {
+            "Heart":      contours,
+            "Left Lung":  [],
+            "Right Lung": [],
+        }
+
+        # ── Save ──────────────────────────────────────────────────────────────
+        _upd(96, "Saving ROI file…")
+        ts_str     = _time.strftime("%Y%m%d_%H%M%S")
+        save_fname = f"platipy_seg_{ts_str}.json"
+        with open(os.path.join(ROI_SAVE_DIR, save_fname), "w") as fh:
+            json.dump({"rois": roi_list, "source": "platipy"}, fh)
+
+        result_dict["saved_file"] = save_fname
+        result_dict["roi_list"]   = roi_list
+        _ml_set(job_id, pct=100, stage="Done!", status="done", result=result_dict)
+
+    except Exception as exc:
+        import traceback as _tb
+        full = _tb.format_exc()
+        print(f"[Platipy ERROR]\n{full}", flush=True)
+        _ml_set(job_id, status="error", stage="Failed", error=f"{exc}\n\n{full}")
+
+
+# ── TotalSegmentator heartchambers_highres ────────────────────────────────────
+
+def _ml_run_ts_heart_sync(job_id: str, series_uid: str):
+    """Heart segmentation via TotalSegmentator 'heartchambers_highres' task.
+    Requires a free research licence: totalseg_get_license_key --email you@...
+    """
+    import time as _time
+
+    def _upd(pct, stage):
+        _ml_set(job_id, pct=pct, stage=stage)
+
+    try:
+        _upd(2, "Checking TotalSegmentator…")
+        try:
+            import SimpleITK as sitk
+        except ImportError:
+            raise RuntimeError("SimpleITK not found — run: pip install TotalSegmentator")
+
+        import tempfile, subprocess, sys, re
+
+        device = "cpu"
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = "gpu"
+        except Exception:
+            pass
+        gpu_label = "GPU" if device == "gpu" else "CPU"
+
+        # ── Collect DICOM ─────────────────────────────────────────────────────
+        _upd(5, f"Scanning DICOM files [{gpu_label}]…")
+        entries = []
+        for fname in os.listdir(UPLOAD_DIR):
+            fpath = os.path.join(UPLOAD_DIR, fname)
+            try:
+                ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+                if getattr(ds, "Modality", "") not in ("CT", "MR"):
+                    continue
+                if series_uid and str(getattr(ds, "SeriesInstanceUID", "")) != series_uid:
+                    continue
+                entries.append((int(getattr(ds, "InstanceNumber", 0)), fpath))
+            except Exception:
+                pass
+        if not entries:
+            raise RuntimeError("No CT slices found for this series.")
+        entries.sort(key=lambda x: x[0])
+        fpaths = [p for _, p in entries]
+
+        _upd(12, f"Loading {len(fpaths)} slices…")
+        reader = sitk.ImageSeriesReader()
+        reader.SetFileNames(fpaths)
+        ct_img = reader.Execute()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path  = os.path.join(tmpdir, "ct.nii.gz")
+            seg_path = os.path.join(tmpdir, "segmentation.nii.gz")
+
+            _upd(18, "Writing NIfTI file…")
+            sitk.WriteImage(ct_img, in_path)
+
+            def _find_ts_bin():
+                bin_dir = os.path.dirname(sys.executable)
+                for name in ("TotalSegmentator", "totalsegmentator"):
+                    c = os.path.join(bin_dir, name)
+                    if os.path.isfile(c):
+                        return c
+                import shutil
+                return (shutil.which("TotalSegmentator") or
+                        shutil.which("totalsegmentator") or "TotalSegmentator")
+
+            def _run_ts_proc(try_device):
+                ts_bin = _find_ts_bin()
+                cmd = [ts_bin, "-i", in_path, "-o", seg_path,
+                       "--task", "heartchambers_highres",
+                       "--device", try_device, "--ml"]
+                print(f"[TS-Heart] CMD: {' '.join(cmd)}", flush=True)
+                _upd(22, f"TotalSegmentator heartchambers_highres [{try_device.upper()}]…")
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, bufsize=1)
+                tail = []
+                for raw in p.stdout:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    print(f"[TS-Heart] {line}", flush=True)
+                    tail.append(line)
+                    if len(tail) > 30:
+                        tail.pop(0)
+                    m = re.search(r'Downloading[^:]*:\s*(\d+)%', line)
+                    if m:
+                        dl = int(m.group(1))
+                        _upd(22 + int(dl * 0.50), f"Downloading weights: {dl}%…")
+                        continue
+                    low = line.lower()
+                    if "resamp" in low:
+                        _upd(73, f"Resampling CT [{try_device.upper()}]…")
+                    elif "predict" in low or "infer" in low:
+                        _upd(76, f"Neural network inference [{try_device.upper()}]…")
+                    elif "saving" in low or "writing" in low:
+                        _upd(80, "Saving segmentation…")
+                return p.wait(), tail
+
+            rc, tail = _run_ts_proc(device)
+            if rc != 0 and device == "gpu":
+                _upd(22, "GPU failed — retrying on CPU…")
+                if os.path.exists(seg_path):
+                    os.remove(seg_path)
+                rc, tail = _run_ts_proc("cpu")
+
+            if rc != 0:
+                snippet = '\n'.join(tail[-15:]) if tail else '(no output)'
+                if any("license" in l.lower() or "not available" in l.lower() for l in tail):
+                    raise RuntimeError(
+                        "heartchambers_highres requires a TotalSegmentator research licence.\n\n"
+                        "Get a free licence (seconds):\n"
+                        "  totalseg_get_license_key --email you@example.com\n\n"
+                        f"TS output:\n{snippet}"
+                    )
+                raise RuntimeError(
+                    f"TotalSegmentator heartchambers_highres failed (exit {rc}).\n\n{snippet}"
+                )
+
+            _upd(82, "Reading segmentation output…")
+            if not os.path.exists(seg_path):
+                raise RuntimeError("TotalSegmentator produced no output file.")
+            seg_sitk   = sitk.ReadImage(seg_path)
+            seg_arr    = sitk.GetArrayFromImage(seg_sitk)
+            px_spacing = seg_sitk.GetSpacing()[0]
+
+        # All non-zero labels = cardiac chambers/myocardium → whole-heart mask
+        _upd(84, "Merging heart chamber labels…")
+        heart_raw = (seg_arr > 0)
+        present = sorted(int(x) for x in np.unique(seg_arr) if x != 0)
+        print(f"[TS-Heart] Chamber labels found: {present}", flush=True)
+
+        if not heart_raw.any():
+            raise RuntimeError(
+                "No cardiac labels found — heartchambers_highres requires a licence.\n"
+                "Run:  totalseg_get_license_key --email you@example.com"
+            )
+
+        # Post-process: close + fill + convex hull per axial slice
+        _upd(87, "Post-processing heart mask…")
+        from skimage.morphology import disk, convex_hull_image
+        from scipy.ndimage import binary_fill_holes, binary_closing
+        close_px = max(1, int(round(15.0 / float(px_spacing))))
+        struct2d = disk(close_px)
+        heart_post = np.zeros_like(heart_raw)
+        for z in range(heart_raw.shape[0]):
+            sl = heart_raw[z]
+            if not sl.any():
+                continue
+            cl = binary_fill_holes(binary_closing(sl, structure=struct2d))
+            try:
+                cl = convex_hull_image(cl)
+            except Exception:
+                pass
+            heart_post[z] = cl
+
+        # Resample mask back to original CT voxel grid
+        _upd(91, "Resampling mask to CT space…")
+        ct_shape = sitk.GetArrayFromImage(ct_img).shape
+        if heart_post.shape != ct_shape:
+            heart_sitk = sitk.GetImageFromArray(heart_post.astype(np.uint8))
+            heart_sitk.CopyInformation(seg_sitk)
+            resampler = sitk.ResampleImageFilter()
+            resampler.SetReferenceImage(ct_img)
+            resampler.SetInterpolator(sitk.sitkNearestNeighbor)
+            resampler.SetDefaultPixelValue(0)
+            heart_post = sitk.GetArrayFromImage(resampler.Execute(heart_sitk)).astype(bool)
+
+        # Build contours + save
+        _upd(93, "Building contours…")
+        contours = _mask_to_contours(heart_post)
+        ts_now   = int(_time.time() * 1000)
+        roi_list = [{
+            "id": ts_now + i, "name": "Heart", "slice": c["slice"], "points": c["points"],
+            "color": "#ef5350", "source": "ts-heart",
+            "plane": "axial", "canvasId": "axialCanvas", "planeIndex": c["slice"],
+        } for i, c in enumerate(contours)]
+
+        result = {"Heart": contours, "Left Lung": [], "Right Lung": []}
+
+        _upd(97, "Saving ROI file…")
+        ts_str = _time.strftime("%Y%m%d_%H%M%S")
+        save_fname = f"ts_heart_{ts_str}.json"
+        with open(os.path.join(ROI_SAVE_DIR, save_fname), "w") as fh:
+            json.dump({"rois": roi_list, "source": "ts-heart"}, fh)
+
+        result["saved_file"] = save_fname
+        result["roi_list"]   = roi_list
+        _ml_set(job_id, pct=100, stage="Done!", status="done", result=result)
+
+    except Exception as exc:
+        import traceback as _tb
+        print(f"[TS-Heart ERROR]\n{_tb.format_exc()}", flush=True)
+        _ml_set(job_id, status="error", stage="Failed", error=str(exc))
+
+
+# ── MONAI whole-heart segmentation ────────────────────────────────────────────
+
+def _ml_run_monai_sync(job_id: str, series_uid: str):
+    """Whole-heart segmentation via MONAI model-zoo 'wholeBody_ct_segmentation' bundle.
+
+    The bundle segments 104 structures (same TotalSegmentator training set).
+    Heart labels are identified dynamically from the bundle's label map, falling
+    back to the known TS-equivalent label indices if the map is unavailable.
+    """
+    import time as _time
+
+    def _upd(pct, stage):
+        _ml_set(job_id, pct=pct, stage=stage)
+
+    # Heart-related keywords used to scan the bundle's label map
+    _HEART_KW = {"heart", "atrium", "ventricle", "myocardium", "pericardium", "cardiac"}
+    # Fallback label indices (mirrors TS 'total' task cardiac labels 51–63)
+    _HEART_FALLBACK = set(range(51, 64))
+
+    try:
+        _upd(2, "Checking MONAI…")
+        try:
+            import monai        # noqa: F401
+            import torch
+        except ImportError as e:
+            raise RuntimeError(
+                f"MONAI not installed.\nRun:  pip install 'monai[all]'\n{e}"
+            )
+
+        import SimpleITK as sitk
+        import pathlib, tempfile
+
+        device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        gpu_label = "GPU" if device.type == "cuda" else "CPU"
+
+        # ── Collect DICOM ─────────────────────────────────────────────────────
+        _upd(5, f"Scanning DICOM files [{gpu_label}]…")
+        entries = []
+        for fname in os.listdir(UPLOAD_DIR):
+            fpath = os.path.join(UPLOAD_DIR, fname)
+            try:
+                ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+                if getattr(ds, "Modality", "") not in ("CT", "MR"):
+                    continue
+                if series_uid and str(getattr(ds, "SeriesInstanceUID", "")) != series_uid:
+                    continue
+                entries.append((int(getattr(ds, "InstanceNumber", 0)), fpath))
+            except Exception:
+                pass
+        if not entries:
+            raise RuntimeError("No CT slices found for this series.")
+        entries.sort(key=lambda x: x[0])
+        fpaths = [p for _, p in entries]
+
+        _upd(10, f"Loading {len(fpaths)} slices…")
+        reader = sitk.ImageSeriesReader()
+        reader.SetFileNames(fpaths)
+        ct_img     = reader.Execute()
+        px_spacing = ct_img.GetSpacing()[0]
+
+        # ── Download bundle if needed ─────────────────────────────────────────
+        BUNDLE_NAME = "wholeBody_ct_segmentation"
+        cache_dir  = pathlib.Path.home() / ".cache" / "monai_bundles"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        bundle_dir = cache_dir / BUNDLE_NAME
+
+        if not (bundle_dir.exists() and any(bundle_dir.iterdir())):
+            _upd(15, f"Downloading MONAI {BUNDLE_NAME} bundle (~1 GB, cached after this)…")
+            from monai.bundle import download as _bdl_dl
+            try:
+                _bdl_dl(name=BUNDLE_NAME, bundle_dir=str(cache_dir))
+            except Exception as dl_err:
+                raise RuntimeError(
+                    f"MONAI bundle download failed: {dl_err}\n\n"
+                    f"To download manually:\n"
+                    f"  python -m monai.bundle download --name {BUNDLE_NAME} "
+                    f"--bundle_dir {cache_dir}\n\n"
+                    f"Or browse all bundles:\n"
+                    f"  python -c \"from monai.bundle import get_all_bundles_list; "
+                    f"print(get_all_bundles_list())\""
+                )
+
+        if not bundle_dir.exists():
+            raise RuntimeError(f"Bundle directory not found: {bundle_dir}")
+
+        # ── Read label map from bundle metadata ───────────────────────────────
+        _upd(22, "Reading bundle label map…")
+        heart_label_ids = set()
+        try:
+            meta_path = bundle_dir / "configs" / "metadata.json"
+            if meta_path.exists():
+                with open(meta_path) as fh:
+                    meta = json.load(fh)
+                # Label map may be under various keys depending on bundle version
+                label_map = (meta.get("label_map") or meta.get("labels") or
+                             meta.get("network_data_format", {})
+                                 .get("outputs", {}).get("pred", {})
+                                 .get("channel_def", {}))
+                if isinstance(label_map, dict):
+                    for key, name in label_map.items():
+                        name_l = str(name).lower()
+                        if any(kw in name_l for kw in _HEART_KW):
+                            try:
+                                heart_label_ids.add(int(key))
+                            except (ValueError, TypeError):
+                                pass
+            print(f"[MONAI] Heart labels from metadata: {sorted(heart_label_ids)}", flush=True)
+        except Exception as e:
+            print(f"[MONAI] Metadata parse failed ({e}), will use fallback indices", flush=True)
+
+        if not heart_label_ids:
+            heart_label_ids = _HEART_FALLBACK
+            print(f"[MONAI] Using fallback heart labels: {sorted(heart_label_ids)}", flush=True)
+
+        # ── Load model ────────────────────────────────────────────────────────
+        _upd(25, "Loading MONAI network…")
+        from monai.bundle import ConfigParser
+
+        config_path = bundle_dir / "configs" / "inference.json"
+        if not config_path.exists():
+            raise RuntimeError(f"inference.json not found in bundle: {config_path}")
+
+        parser = ConfigParser()
+        parser.read_config(str(config_path))
+
+        # Find checkpoint
+        models_dir = bundle_dir / "models"
+        ckpt_files = (sorted(models_dir.glob("*.pt")) + sorted(models_dir.glob("*.pth"))
+                      if models_dir.exists() else [])
+        if not ckpt_files:
+            raise RuntimeError(f"No model checkpoint found in {models_dir}")
+        ckpt_path = ckpt_files[0]
+        print(f"[MONAI] Checkpoint: {ckpt_path}", flush=True)
+
+        network  = parser.get_parsed_content("network_def", instantiate=True)
+        raw_ckpt = torch.load(str(ckpt_path), map_location=device)
+        state    = raw_ckpt.get("state_dict", raw_ckpt.get("model", raw_ckpt))
+        network.load_state_dict(state)
+        network.to(device).eval()
+
+        # ── Write CT to NIfTI + preprocess ────────────────────────────────────
+        _upd(35, "Preprocessing CT volume…")
+        with tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False) as tmp:
+            ct_nii_path = tmp.name
+        sitk.WriteImage(ct_img, ct_nii_path)
+
+        try:
+            preprocessing = parser.get_parsed_content("preprocessing", instantiate=True)
+            data          = preprocessing({"image": ct_nii_path})
+            image_tensor  = data["image"].unsqueeze(0)   # keep on CPU until inference
+
+            from monai.inferers import SlidingWindowInferer
+
+            # Always use a memory-safe inferer regardless of what the bundle config says.
+            # roi_size=96³ needs ~3 GB; the bundle default (192³) needs ~10 GB.
+            # overlap=0.25 + sw_batch_size=1 minimise peak VRAM.
+            safe_inferer = SlidingWindowInferer(
+                roi_size=(96, 96, 96),
+                sw_batch_size=1,
+                overlap=0.25,
+                mode="gaussian",
+                progress=False,
+            )
+
+            def _run_inference(run_device):
+                net = network.to(run_device)
+                img = image_tensor.to(run_device)
+                # fp16 halves memory on GPU; no effect on CPU
+                use_amp = (run_device.type == "cuda")
+                with torch.no_grad():
+                    if use_amp:
+                        with torch.cuda.amp.autocast():
+                            return safe_inferer(img, net).cpu()
+                    else:
+                        return safe_inferer(img, net).cpu()
+
+            _upd(50, f"Neural network inference [{gpu_label}] (roi=96³, may take a few min)…")
+            try:
+                pred = _run_inference(device)
+            except RuntimeError as oom:
+                if "out of memory" in str(oom).lower() and device.type == "cuda":
+                    print("[MONAI] GPU OOM — falling back to CPU…", flush=True)
+                    _upd(50, "GPU out of memory — retrying on CPU (slower)…")
+                    torch.cuda.empty_cache()
+                    network.cpu()
+                    pred = _run_inference(torch.device("cpu"))
+                else:
+                    raise
+
+            # ── Extract heart labels from prediction ──────────────────────────
+            _upd(78, "Extracting heart labels from segmentation…")
+            pred_np = pred[0].numpy()   # (C, Z, R, C) or (1, Z, R, C)
+
+            if pred_np.shape[0] > 1:
+                # Multi-class output → argmax → keep only heart label indices
+                label_vol  = pred_np.argmax(axis=0)          # (Z, R, C) integer labels
+                heart_mask = np.zeros(label_vol.shape, dtype=bool)
+                for lid in heart_label_ids:
+                    heart_mask |= (label_vol == lid)
+                print(f"[MONAI] Heart voxels after label selection: {heart_mask.sum()}", flush=True)
+            else:
+                # Binary output
+                heart_mask = (pred_np[0] > 0.5)
+
+        finally:
+            if os.path.exists(ct_nii_path):
+                os.unlink(ct_nii_path)
+
+        # Resample to original CT voxel grid if shapes differ
+        ct_arr = sitk.GetArrayFromImage(ct_img)
+        if heart_mask.shape != ct_arr.shape:
+            _upd(82, "Resampling mask to CT space…")
+            heart_sitk = sitk.GetImageFromArray(heart_mask.astype(np.uint8))
+            scale = tuple(o / n for o, n in zip(ct_arr.shape, heart_mask.shape))
+            heart_sitk.SetSpacing(tuple(s * sc
+                                        for s, sc in zip(ct_img.GetSpacing(), reversed(scale))))
+            heart_sitk.SetOrigin(ct_img.GetOrigin())
+            heart_sitk.SetDirection(ct_img.GetDirection())
+            resampler = sitk.ResampleImageFilter()
+            resampler.SetReferenceImage(ct_img)
+            resampler.SetInterpolator(sitk.sitkNearestNeighbor)
+            heart_mask = sitk.GetArrayFromImage(resampler.Execute(heart_sitk)).astype(bool)
+
+        if not heart_mask.any():
+            raise RuntimeError(
+                "MONAI returned an empty heart mask.\n"
+                f"Heart label IDs used: {sorted(heart_label_ids)}\n"
+                "The bundle's label map may use different indices — check the bundle metadata."
+            )
+
+        # Post-process
+        _upd(85, "Smoothing heart mask…")
+        from skimage.morphology import disk, convex_hull_image
+        from scipy.ndimage import binary_fill_holes, binary_closing
+        close_px = max(1, int(round(15.0 / float(px_spacing))))
+        struct2d = disk(close_px)
+        heart_post = np.zeros_like(heart_mask)
+        for z in range(heart_mask.shape[0]):
+            sl = heart_mask[z]
+            if not sl.any():
+                continue
+            cl = binary_fill_holes(binary_closing(sl, structure=struct2d))
+            try:
+                cl = convex_hull_image(cl)
+            except Exception:
+                pass
+            heart_post[z] = cl
+
+        # Build contours + save
+        _upd(91, "Building contours…")
+        contours = _mask_to_contours(heart_post)
+        ts_now   = int(_time.time() * 1000)
+        roi_list = [{
+            "id": ts_now + i, "name": "Heart", "slice": c["slice"], "points": c["points"],
+            "color": "#ef5350", "source": "monai",
+            "plane": "axial", "canvasId": "axialCanvas", "planeIndex": c["slice"],
+        } for i, c in enumerate(contours)]
+
+        result = {"Heart": contours, "Left Lung": [], "Right Lung": []}
+
+        _upd(97, "Saving ROI file…")
+        ts_str = _time.strftime("%Y%m%d_%H%M%S")
+        save_fname = f"monai_seg_{ts_str}.json"
+        with open(os.path.join(ROI_SAVE_DIR, save_fname), "w") as fh:
+            json.dump({"rois": roi_list, "source": "monai"}, fh)
+
+        result["saved_file"] = save_fname
+        result["roi_list"]   = roi_list
+        _ml_set(job_id, pct=100, stage="Done!", status="done", result=result)
+
+    except Exception as exc:
+        import traceback as _tb
+        print(f"[MONAI ERROR]\n{_tb.format_exc()}", flush=True)
+        _ml_set(job_id, status="error", stage="Failed", error=str(exc))
+
+
+# ── MedSAM slice-by-slice heart segmentation ──────────────────────────────────
+
+def _ml_run_medsam_sync(job_id: str, series_uid: str):
+    """Slice-by-slice heart segmentation via MedSAM (HuggingFace transformers)."""
+    import time as _time
+
+    def _upd(pct, stage):
+        _ml_set(job_id, pct=pct, stage=stage)
+
+    try:
+        _upd(2, "Checking MedSAM dependencies…")
+        try:
+            from transformers import SamModel, SamProcessor
+            import torch
+            from PIL import Image
+        except ImportError as e:
+            raise RuntimeError(
+                f"Required packages missing.\n"
+                f"Run:  pip install transformers Pillow\n{e}"
+            )
+
+        import SimpleITK as sitk
+
+        device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        gpu_label = "GPU" if device.type == "cuda" else "CPU"
+
+        # ── Collect DICOM ─────────────────────────────────────────────────────
+        _upd(5, f"Scanning DICOM files [{gpu_label}]…")
+        entries = []
+        for fname in os.listdir(UPLOAD_DIR):
+            fpath = os.path.join(UPLOAD_DIR, fname)
+            try:
+                ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+                if getattr(ds, "Modality", "") not in ("CT", "MR"):
+                    continue
+                if series_uid and str(getattr(ds, "SeriesInstanceUID", "")) != series_uid:
+                    continue
+                entries.append((int(getattr(ds, "InstanceNumber", 0)), fpath))
+            except Exception:
+                pass
+        if not entries:
+            raise RuntimeError("No CT slices found for this series.")
+        entries.sort(key=lambda x: x[0])
+        fpaths = [p for _, p in entries]
+
+        _upd(10, f"Loading {len(fpaths)} slices…")
+        reader = sitk.ImageSeriesReader()
+        reader.SetFileNames(fpaths)
+        ct_img     = reader.Execute()
+        ct_arr     = sitk.GetArrayFromImage(ct_img).astype(float)   # (nz, nr, nc)
+        nz, nr, nc = ct_arr.shape
+        px_spacing = ct_img.GetSpacing()[0]
+
+        # ── Load MedSAM model (downloads ~375 MB on first use) ────────────────
+        _upd(15, "Loading MedSAM model (downloads ~375 MB on first use)…")
+        MODEL_ID = "flaviagiammarino/medsam-vit-base"
+        try:
+            processor = SamProcessor.from_pretrained(MODEL_ID)
+            model     = SamModel.from_pretrained(MODEL_ID).to(device)
+            model.eval()
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load MedSAM from HuggingFace: {e}\n"
+                "Ensure internet access and run:  pip install transformers"
+            )
+
+        # ── Estimate cardiac z-range ──────────────────────────────────────────
+        _upd(25, "Estimating cardiac z-range…")
+        # Count soft-tissue voxels in mediastinum columns per slice
+        col_lo = int(nc * 0.20); col_hi = int(nc * 0.80)
+        soft_counts = ((ct_arr >= -100) & (ct_arr <= 250))[:, :, col_lo:col_hi].sum(axis=(1, 2))
+        if soft_counts.any():
+            threshold = float(np.percentile(soft_counts[soft_counts > 0], 60))
+            cardiac_slices = [z for z in range(nz) if soft_counts[z] >= threshold]
+        else:
+            cardiac_slices = list(range(int(nz * 0.3), int(nz * 0.7)))
+        print(f"[MedSAM] Cardiac z-range: {min(cardiac_slices)}–{max(cardiac_slices)} "
+              f"({len(cardiac_slices)} slices)", flush=True)
+
+        # ── Slice-by-slice SAM inference ──────────────────────────────────────
+        heart_mask = np.zeros((nz, nr, nc), dtype=bool)
+        n_slices   = len(cardiac_slices)
+        wc, ww     = 40.0, 400.0          # soft-tissue window centre / width
+        lo, hi     = wc - ww / 2, wc + ww / 2
+
+        for idx, z in enumerate(cardiac_slices):
+            pct = 30 + int(idx / n_slices * 52)
+            if idx % 5 == 0:
+                _upd(pct, f"MedSAM slice {idx + 1}/{n_slices} [{gpu_label}]…")
+
+            # Normalise HU to 0–255 (soft-tissue window)
+            sl_norm = np.clip((ct_arr[z] - lo) / ww, 0.0, 1.0) * 255.0
+            sl_rgb  = np.stack([sl_norm, sl_norm, sl_norm], axis=-1).astype(np.uint8)
+            pil_img = Image.fromarray(sl_rgb)
+
+            # Mediastinum bbox (loose, covers the heart)
+            r_lo = int(nr * 0.25); r_hi = int(nr * 0.75)
+            c_lo = int(nc * 0.25); c_hi = int(nc * 0.75)
+            bbox = [[c_lo, r_lo, c_hi, r_hi]]     # [x_min, y_min, x_max, y_max]
+
+            try:
+                inputs = processor(images=pil_img, input_boxes=[[bbox]], return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                masks = processor.image_processor.post_process_masks(
+                    outputs.pred_masks.cpu(),
+                    inputs["original_sizes"].cpu(),
+                    inputs["reshaped_input_sizes"].cpu(),
+                )
+                # Pick highest-scoring mask (masks[0]: (1, n_masks, H, W))
+                scores     = outputs.iou_scores[0][0].cpu().numpy()
+                best_idx   = int(np.argmax(scores))
+                pred_mask  = masks[0][0][best_idx].numpy()
+                heart_mask[z] = pred_mask
+            except Exception as slice_err:
+                print(f"[MedSAM] Slice {z} failed: {slice_err}", flush=True)
+
+        if not heart_mask.any():
+            raise RuntimeError(
+                "MedSAM returned an empty mask. "
+                "Check that the CT covers the heart region."
+            )
+
+        # Keep largest 3-D connected component
+        _upd(84, "Filtering largest cardiac component…")
+        from scipy import ndimage as _ndi
+        labeled, n_comp = _ndi.label(heart_mask)
+        if n_comp > 1:
+            sizes      = _ndi.sum(heart_mask, labeled, range(1, n_comp + 1))
+            heart_mask = (labeled == int(np.argmax(sizes)) + 1)
+
+        # Post-process: close + fill + convex hull per slice
+        _upd(87, "Smoothing heart mask…")
+        from skimage.morphology import disk, convex_hull_image
+        from scipy.ndimage import binary_fill_holes, binary_closing
+        close_px = max(1, int(round(12.0 / float(px_spacing))))
+        struct2d = disk(close_px)
+        heart_post = np.zeros_like(heart_mask)
+        for z in range(nz):
+            sl = heart_mask[z]
+            if not sl.any():
+                continue
+            cl = binary_fill_holes(binary_closing(sl, structure=struct2d))
+            try:
+                cl = convex_hull_image(cl)
+            except Exception:
+                pass
+            heart_post[z] = cl
+
+        # Build contours + save
+        _upd(93, "Building contours…")
+        contours = _mask_to_contours(heart_post)
+        ts_now   = int(_time.time() * 1000)
+        roi_list = [{
+            "id": ts_now + i, "name": "Heart", "slice": c["slice"], "points": c["points"],
+            "color": "#ef5350", "source": "medsam",
+            "plane": "axial", "canvasId": "axialCanvas", "planeIndex": c["slice"],
+        } for i, c in enumerate(contours)]
+
+        result = {"Heart": contours, "Left Lung": [], "Right Lung": []}
+
+        _upd(97, "Saving ROI file…")
+        ts_str = _time.strftime("%Y%m%d_%H%M%S")
+        save_fname = f"medsam_seg_{ts_str}.json"
+        with open(os.path.join(ROI_SAVE_DIR, save_fname), "w") as fh:
+            json.dump({"rois": roi_list, "source": "medsam"}, fh)
+
+        result["saved_file"] = save_fname
+        result["roi_list"]   = roi_list
+        _ml_set(job_id, pct=100, stage="Done!", status="done", result=result)
+
+    except Exception as exc:
+        import traceback as _tb
+        print(f"[MedSAM ERROR]\n{_tb.format_exc()}", flush=True)
+        _ml_set(job_id, status="error", stage="Failed", error=str(exc))
+
+
 @app.post("/ml-segment-start")
 async def ml_segment_start(payload: dict = Body(...)):
     """
-    Start a TotalSegmentator job in the background.
+    Start a segmentation job in the background.
     Returns immediately with a job_id; poll /ml-segment-status/{job_id}.
 
-    Body: { "series_uid": "...", "fast": true }
+    Body: { "series_uid": "...", "fast": true,
+            "method": "totalsegmentator"|"platipy"|"ts-heart"|"monai"|"medsam" }
     """
     import uuid
     # Evict old jobs (keep 20 most recent).
@@ -2201,7 +3199,18 @@ async def ml_segment_start(payload: dict = Body(...)):
 
     series_uid = payload.get("series_uid", "")
     fast       = bool(payload.get("fast", True))
-    asyncio.create_task(asyncio.to_thread(_ml_run_sync, job_id, series_uid, fast))
+    method     = payload.get("method", "totalsegmentator")
+
+    if method == "platipy":
+        asyncio.create_task(asyncio.to_thread(_ml_run_platipy_sync, job_id, series_uid))
+    elif method == "ts-heart":
+        asyncio.create_task(asyncio.to_thread(_ml_run_ts_heart_sync, job_id, series_uid))
+    elif method == "monai":
+        asyncio.create_task(asyncio.to_thread(_ml_run_monai_sync, job_id, series_uid))
+    elif method == "medsam":
+        asyncio.create_task(asyncio.to_thread(_ml_run_medsam_sync, job_id, series_uid))
+    else:
+        asyncio.create_task(asyncio.to_thread(_ml_run_sync, job_id, series_uid, fast))
     return {"job_id": job_id}
 
 
@@ -2212,6 +3221,193 @@ async def ml_segment_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+# ── ROI → 3D binary field mask ─────────────────────────────────────────────────
+
+def _polygon_to_mask(points: list, rows: int, cols: int) -> np.ndarray:
+    """
+    Rasterise a polygon given as [[col, row], ...] into a (rows, cols) bool mask.
+    Uses skimage.draw.polygon for sub-pixel-accurate filling.
+    """
+    mask = np.zeros((rows, cols), dtype=bool)
+    if len(points) < 3:
+        return mask
+    r_arr = np.array([p[1] for p in points], dtype=float)
+    c_arr = np.array([p[0] for p in points], dtype=float)
+    rr, cc = ski_polygon(r_arr, c_arr, shape=(rows, cols))
+    mask[rr, cc] = True
+    return ndi.binary_fill_holes(mask)
+
+
+def _interpolate_masks_sdt(
+    masks: dict,      # {slice_idx: bool ndarray (rows, cols)}
+    nz: int,
+    rows: int,
+    cols: int,
+) -> np.ndarray:
+    """
+    Fill a 3-D volume from sparse per-slice binary masks using signed-distance-
+    transform (SDT) interpolation.
+
+    Algorithm
+    ---------
+    1. For every annotated slice compute an SDT:
+         SDT > 0  inside the mask  (= distance to boundary from inside)
+         SDT < 0  outside the mask (= negative distance to boundary)
+    2. Between two consecutive annotated slices z0 / z1 linearly blend their SDTs.
+    3. Threshold at 0 → binary mask.
+    4. Fill holes per slice.
+    5. Annotated slices beyond the first / last are replicated outward
+       (no extrapolation into unannotated territory outside the label range).
+
+    Returns
+    -------
+    np.ndarray  shape (nz, rows, cols)  dtype bool
+    """
+    annotated = sorted(masks.keys())
+
+    # Compute per-annotated-slice SDT
+    sdts: dict[int, np.ndarray] = {}
+    for z, m in masks.items():
+        inside  = ndi.distance_transform_edt(m).astype(np.float32)
+        outside = ndi.distance_transform_edt(~m).astype(np.float32)
+        sdts[z] = inside - outside   # positive = inside
+
+    field = np.full((nz, rows, cols), -1e9, dtype=np.float32)
+
+    # Copy annotated slices directly (SDT value)
+    for z, sdt in sdts.items():
+        field[z] = sdt
+
+    # Interpolate between consecutive annotated slices
+    for i in range(len(annotated) - 1):
+        z0, z1 = annotated[i], annotated[i + 1]
+        span = z1 - z0
+        for z in range(z0 + 1, z1):
+            t = (z - z0) / span
+            field[z] = (1.0 - t) * sdts[z0] + t * sdts[z1]
+
+    # Replicate first annotated slice backwards
+    for z in range(0, annotated[0]):
+        field[z] = sdts[annotated[0]]
+
+    # Replicate last annotated slice forwards
+    for z in range(annotated[-1] + 1, nz):
+        field[z] = sdts[annotated[-1]]
+
+    # Threshold and fill holes
+    result = field > 0
+    for z in range(nz):
+        if result[z].any():
+            result[z] = ndi.binary_fill_holes(result[z])
+    return result
+
+
+@app.post("/roi-field-mask")
+async def roi_field_mask(payload: dict = Body(...)):
+    """
+    Convert named polygon ROIs (same name, multiple slices) to a 3-D binary
+    field mask whose dimensions match the loaded CT volume.
+
+    Body (one of two forms):
+      { "filename":   "roi_20260404_123456.json",   // load from backend saved_rois
+        "roi_name":   "Heart",                       // optional — default: first name found
+        "series_uid": "...",                         // optional
+      }
+    OR:
+      { "rois":       [ { "name", "slice", "points": [[col,row],...] }, ... ],
+        "roi_name":   "Heart",
+        "series_uid": "...",
+      }
+
+    Returns:
+      {
+        "shape":               [nz, nrows, ncols],
+        "annotated_slices":    N,   // slices with drawn polygons
+        "interpolated_slices": M,   // slices filled by interpolation
+        "voxel_count":         V,   // total True voxels
+        "field_mask_b64":      "…"  // base64(zlib(uint8 flat bytes, C-order))
+      }
+
+    Decompression (Python):
+        import base64, zlib, numpy as np
+        raw   = zlib.decompress(base64.b64decode(resp["field_mask_b64"]))
+        mask  = np.frombuffer(raw, dtype=np.uint8).reshape(resp["shape"]).astype(bool)
+    """
+    series_uid = payload.get("series_uid", "")
+    roi_name   = payload.get("roi_name",   "")
+
+    # ── Resolve ROI list ──────────────────────────────────────────────────────
+    rois = payload.get("rois")
+    if rois is None:
+        filename = payload.get("filename")
+        if not filename:
+            raise HTTPException(422, "Provide 'rois' list or 'filename'")
+        safe = os.path.basename(filename)
+        fpath = os.path.join(ROI_SAVE_DIR, safe)
+        if not os.path.exists(fpath):
+            raise HTTPException(404, f"ROI file not found: {safe}")
+        with open(fpath) as f:
+            record = json.load(f)
+        rois = record.get("rois", [])
+
+    if not rois:
+        raise HTTPException(422, "'rois' list is empty")
+
+    # ── Filter by name ────────────────────────────────────────────────────────
+    if roi_name:
+        rois = [r for r in rois if r.get("name") == roi_name]
+    else:
+        roi_name = rois[0].get("name", "")
+        rois = [r for r in rois if r.get("name") == roi_name]
+
+    if not rois:
+        raise HTTPException(422, f"No ROIs found with name '{roi_name}'")
+
+    # ── Load CT volume dimensions ─────────────────────────────────────────────
+    vol, _ct_slices = await asyncio.to_thread(_load_ct_volume, series_uid)
+    if vol is None:
+        raise HTTPException(422, "No CT volume found — upload DICOM files first")
+    nz, nrows, ncols = vol.shape
+
+    # ── Rasterise polygons ────────────────────────────────────────────────────
+    masks: dict[int, np.ndarray] = {}
+    for roi in rois:
+        z      = int(roi.get("slice", roi.get("planeIndex", 0)))
+        points = roi.get("points", [])
+        if z < 0 or z >= nz or len(points) < 3:
+            continue
+        m = _polygon_to_mask(points, nrows, ncols)
+        if z in masks:
+            masks[z] |= m   # union if multiple polygons on the same slice
+        else:
+            masks[z] = m
+
+    if not masks:
+        raise HTTPException(422, "No valid polygons could be rasterised (check slice indices)")
+
+    # ── SDT interpolation (CPU-bound → offload) ───────────────────────────────
+    field_mask = await asyncio.to_thread(
+        _interpolate_masks_sdt, masks, nz, nrows, ncols
+    )
+
+    annotated_count     = len(masks)
+    interpolated_count  = int(field_mask.any(axis=(1, 2)).sum()) - annotated_count
+    voxel_count         = int(field_mask.sum())
+
+    # ── Serialise: zlib-compress uint8 bytes, base64-encode ──────────────────
+    raw        = field_mask.astype(np.uint8).tobytes()   # C-order (z,row,col)
+    compressed = zlib.compress(raw, level=6)
+    b64        = base64.b64encode(compressed).decode()
+
+    return {
+        "shape":               list(field_mask.shape),
+        "annotated_slices":    annotated_count,
+        "interpolated_slices": max(0, interpolated_count),
+        "voxel_count":         voxel_count,
+        "field_mask_b64":      b64,
+    }
 
 
 @app.get("/")

@@ -83,6 +83,7 @@ pip install fastapi uvicorn pydicom python-multipart
 - Required backend packages (one-time install): numpy, scipy, scikit-image
 - `mpr-tab.html`: loads `roi-store.js` + `roi-save.js`; Draw/Edit/Save/Load/Export buttons + two file `<select>` pickers
 - `mpr-tab-init.js`: `toggleMprEdit`, `showMprLoadPicker`, `loadSelectedMprRoi`, `showMprExportPicker`, `exportSelectedMprRoi`; stores `_mprSeriesUid` from postMessage payload
+- ROI → 3D field mask: `POST /roi-field-mask` accepts `{ filename|rois, roi_name, series_uid }`; returns `{ shape, annotated_slices, interpolated_slices, voxel_count, field_mask_b64 }` where `field_mask_b64` = base64(zlib(uint8 C-order bytes)); `_polygon_to_mask()` rasterises `[[col,row]]` polygons via `skimage.draw.polygon` + `binary_fill_holes`; `_interpolate_masks_sdt()` builds SDT per annotated slice (positive inside), linearly blends between slices, thresholds at 0; UI in `ml-seg-tab.html` + `ml-seg-tab-init.js`: file picker, ROI name filter, Generate button, stats display, **⬇ Download .npy** (browser-side .npy assembly with `DecompressionStream` inflate, no round-trip)
 
 ## GPU Rendering Notes
 

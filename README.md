@@ -330,6 +330,51 @@ RTSTRUCT dataset
 - `frontend/roi-save.js`: `roiSave.save()` POSTs full `roiStore` payload; `loadList()` / `load(filename)` for retrieval
 - "↑ Save ROIs" button added to Structures panel
 
+### ROI → 3D Binary Field Mask
+
+Converts polygon ROIs (same name across multiple slices) into a full 3-D binary volume aligned to the CT.
+
+#### API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/roi-field-mask` | POST | Compute 3-D binary mask from ROI polygons |
+
+**Body** (choose one):
+```json
+{ "filename": "roi_20260404_123456.json", "roi_name": "Heart", "series_uid": "..." }
+{ "rois": [...],                           "roi_name": "Heart", "series_uid": "..." }
+```
+
+**Response:**
+```json
+{ "shape": [nz, nrows, ncols],
+  "annotated_slices":    N,
+  "interpolated_slices": M,
+  "voxel_count":         V,
+  "field_mask_b64":      "<base64 zlib-compressed uint8 C-order bytes>" }
+```
+
+Deserialise in Python:
+```python
+import base64, zlib, numpy as np
+raw  = zlib.decompress(base64.b64decode(resp["field_mask_b64"]))
+mask = np.frombuffer(raw, dtype=np.uint8).reshape(resp["shape"]).astype(bool)
+```
+
+#### Algorithm
+
+1. **Polygon rasterisation** — `skimage.draw.polygon` rasterises each `[[col, row]]` polygon into a per-slice binary mask; holes filled with `scipy.ndimage.binary_fill_holes`
+2. **Signed-distance-transform (SDT) interpolation** — for each annotated slice a SDT is computed (positive inside, negative outside); between any two annotated slice positions the SDTs are linearly blended; threshold at 0 gives a smooth interpolated binary mask
+3. **Boundary replication** — slices before/after the first/last annotated position copy that slice's mask (no extrapolation)
+4. **Hole fill** — `binary_fill_holes` applied per slice on the final volume
+
+#### UI (AI Segmentation tab)
+
+- **↻ Refresh** — loads saved ROI file list from `/load-roi/`
+- Select file → enter optional ROI name filter → **▶ Generate** — calls `/roi-field-mask` and displays shape, annotated/interpolated slice counts, and total voxel count
+- **⬇ Download .npy** — packages the mask directly in the browser as a valid NumPy 1.0 `.npy` file (no round-trip); uses `DecompressionStream` (Chrome ≥ 80 / Firefox ≥ 113) to inflate zlib in-browser
+
 ### Auto-Segmentation (Lung + Heart)
 
 CPU-only automatic contouring from CT in the MPR view. No GPU, no model downloads.
