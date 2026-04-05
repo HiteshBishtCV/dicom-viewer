@@ -483,7 +483,7 @@ Both endpoints run in a background thread (`asyncio.to_thread`) so the UI and WA
 Draw axial ROIs at 2 or more Z slices with the same name (key frames), then click **⟷ Interpolate** to fill every intermediate slice automatically.
 
 - **Arc-length resampling** — each key-frame polygon is resampled to 64 uniformly-spaced points regardless of original vertex count
-- **Start-point alignment** — the second contour's starting index is rotated to minimise sum-of-squared distances to the first, preventing twisted paths
+- **Start-point alignment** — both winding directions of B are tested (B as-is and B reversed), and for each direction all cyclic rotations are evaluated; the globally best (direction, offset) combination is chosen; this prevents twisted-ribbon interpolation caused by CW/CCW mismatch between polygons drawn in different order
 - **Linear blending** — each intermediate slice at z is: `t = (z - z_A) / (z_B - z_A)`, then `pt[i] = (1-t)·A[i] + t·B[i]`
 - Works between each consecutive pair of key frames (3 key frames = 2 interpolated segments)
 - Interpolated contours rendered dashed + semi-transparent to distinguish from hand-drawn key frames

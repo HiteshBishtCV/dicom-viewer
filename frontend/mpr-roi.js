@@ -1181,27 +1181,42 @@ const mprRoi = (() => {
   }
 
   /**
-   * Rotate B's starting index so that its first point aligns as closely as
-   * possible to A's first point.  This prevents twisted-ribbon interpolation
-   * between similarly-shaped polygons that happen to start at different vertices.
+   * Align B to A by finding the rotation + winding direction that minimises
+   * the sum of squared point-to-point distances.
+   *
+   * Two passes are run:
+   *   1. B as-is       (same winding as drawn)
+   *   2. B reversed    (opposite winding — handles CW vs CCW mismatch)
+   *
+   * For each pass every cyclic rotation is tested.  The globally best
+   * (direction, offset) combination is returned.  Without the reversal pass,
+   * polygons drawn in opposite winding orders produce self-intersecting
+   * (twisted-ribbon) interpolated contours.
+   *
    * @param {Array<{ix,iy}>} A  — reference (not mutated)
-   * @param {Array<{ix,iy}>} B  — candidate (returned rotated)
+   * @param {Array<{ix,iy}>} B  — candidate (returned aligned, not mutated)
    * @returns {Array<{ix,iy}>}
    */
   function _alignStartPoint(A, B) {
-    const N = A.length;
-    let bestK = 0, bestCost = Infinity;
-    for (let k = 0; k < N; k++) {
-      let cost = 0;
-      for (let i = 0; i < N; i++) {
-        const dx = A[i].ix - B[(i + k) % N].ix;
-        const dy = A[i].iy - B[(i + k) % N].iy;
-        cost += dx * dx + dy * dy;
-        if (cost >= bestCost) break;   // early exit
+    const N    = A.length;
+    const Brev = B.slice().reverse();   // opposite winding
+
+    let bestCost = Infinity, bestK = 0, bestArr = B;
+
+    for (const cand of [B, Brev]) {
+      for (let k = 0; k < N; k++) {
+        let cost = 0;
+        for (let i = 0; i < N; i++) {
+          const dx = A[i].ix - cand[(i + k) % N].ix;
+          const dy = A[i].iy - cand[(i + k) % N].iy;
+          cost += dx * dx + dy * dy;
+          if (cost >= bestCost) break;   // early exit
+        }
+        if (cost < bestCost) { bestCost = cost; bestK = k; bestArr = cand; }
       }
-      if (cost < bestCost) { bestCost = cost; bestK = k; }
     }
-    return bestK === 0 ? B : B.slice(bestK).concat(B.slice(0, bestK));
+
+    return bestK === 0 ? bestArr : bestArr.slice(bestK).concat(bestArr.slice(0, bestK));
   }
 
   /**
